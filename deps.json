@@ -1,0 +1,75 @@
+{
+  "required": [
+    {
+      "id": "yt-dlp",
+      "label": "yt-dlp",
+      "path": "bin/yt-dlp.exe",
+      "download": {
+        "source": "direct",
+        "type": "file",
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+        "timeout": 300
+      }
+    },
+    {
+      "id": "n_m3u8dl_re",
+      "label": "N_m3u8DL-RE",
+      "path": "bin/N_m3u8DL-RE.exe",
+      "download": {
+        "source": "github_release",
+        "type": "zip",
+        "repo": "nilaoda/N_m3u8DL-RE",
+        "asset_pattern": "*win-x64*.zip",
+        "member": "N_m3u8DL-RE.exe",
+        "timeout": 300
+      }
+    },
+    {
+      "id": "ffmpeg",
+      "label": "FFmpeg",
+      "path": "bin/ffmpeg.exe",
+      "download": {
+        "source": "direct",
+        "type": "zip",
+        "url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        "member": "ffmpeg.exe",
+        "timeout": 600
+      }
+    }
+  ],
+  "recommended": [
+    {
+      "id": "aria2",
+      "label": "aria2c",
+      "path": "bin/aria2c.exe",
+      "download": {
+        "source": "github_release",
+        "type": "zip",
+        "repo": "aria2/aria2",
+        "asset_pattern": "*win-64bit*.zip",
+        "member": "aria2c.exe",
+        "timeout": 300
+      }
+    },
+    {
+      "id": "streamlink",
+      "label": "Streamlink",
+      "path": "bin/streamlink.exe",
+      "download": {
+        "source": "github_release",
+        "type": "zip",
+        "repo": "streamlink/windows-builds",
+        "asset_pattern": "streamlink-*-x86_64.zip",
+        "member": "streamlink.exe",
+        "timeout": 600
+      }
+    }
+  ],
+  "optional": [
+    {
+      "id": "deno",
+      "label": "Deno",
+      "path": "bin/deno.exe"
+    }
+  ]
+}

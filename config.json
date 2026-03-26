@@ -1,0 +1,80 @@
+{
+    "download_dir": "C:\\Users\\qinghua\\Downloads",
+    "temp_dir": "C:\\Users\\qinghua\\AppData\\Local\\Temp\\M3U8Sniffer",
+    "max_concurrent_downloads": 1,
+    "speed_limit": 2,
+    "max_retry_attempts": 3,
+    "retry_backoff_seconds": 2,
+    "site_rules": [],
+    "site_rules_auto": {
+        "enabled": false,
+        "max_rules": 50,
+        "allow_cookie": false
+    },
+    "features": {
+        "sniffer_rules_enabled": true,
+        "sniffer_dedup_enabled": true,
+        "sniffer_filter_noise": true,
+        "download_retry_enabled": true,
+        "download_engine_fallback": true,
+        "download_auth_retry_first": true,
+        "download_auth_retry_per_engine": 1,
+        "download_candidate_ranking_enabled": true,
+        "hls_probe_enabled": true,
+        "hls_probe_hard_fail": true,
+        "browser_capture_window_enabled": true,
+        "browser_capture_window_seconds": 12,
+        "browser_capture_extend_on_hit_seconds": 4,
+        "browser_capture_probe_interval_ms": 1000,
+        "ui_batch_actions": true,
+        "ui_filter_search": true
+    },
+    "engines": {
+        "n_m3u8dl_re": {
+            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\N_m3u8DL-RE.exe",
+            "thread_count": 1,
+            "thread_min": 4,
+            "thread_max": 32,
+            "retry_count": 3,
+            "max_retry": 5,
+            "adaptive": false,
+            "output_format": "mp4"
+        },
+        "ytdlp": {
+            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\yt-dlp.exe"
+        },
+        "streamlink": {
+            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\streamlink.exe"
+        },
+        "aria2": {
+            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\aria2c.exe",
+            "max_connection_per_server": 16,
+            "split": 16
+        },
+        "ffmpeg": {
+            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\ffmpeg.exe"
+        }
+    },
+    "notification_enabled": true,
+    "auto_delete_temp": true,
+    "proxy": {
+        "enabled": false,
+        "http": "",
+        "https": ""
+    },
+    "_说明": {
+        "max_concurrent_downloads": "同时下载任务数，建议 2-3",
+        "speed_limit": "下载限速(MB/s)，0 表示不限速",
+        "max_retry_attempts": "任务最大重试次数（含引擎切换）",
+        "retry_backoff_seconds": "重试等待秒数",
+        "site_rules": "站点规则数组，字段示例: name/domains/url_keywords/referer/user_agent/headers",
+        "features": "功能开关集合(sniffer/download/ui)",
+        "thread_count": "单任务下载线程数，建议 8-16",
+        "thread_min": "自适应线程下限",
+        "thread_max": "自适应线程上限",
+        "retry_count": "引擎内部重试次数",
+        "max_retry": "引擎最大重试次数(兼容参数)",
+        "adaptive": "弱网自适应开关(引擎支持时生效)",
+        "output_format": "输出格式，建议 mp4"
+    }
+}
