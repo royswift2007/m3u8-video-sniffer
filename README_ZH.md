@@ -6,6 +6,16 @@
 
 > 面向 Windows 桌面环境的流媒体资源嗅探、解析、下载与安装分发工具。当前版本已形成较完整的“内置浏览器工作台 → 资源捕获 → 下载队列 → 安装包发布 → 协议联动”链路，并已提供带安装界面的安装包方案。
 
+
+<p align="center">
+  <img src="images/brower%20workbench.jpg" width="800" alt="Main Interface">
+</p>
+
+<p align="center">
+  <img src="images/download%20center.jpg" width="400" alt="Download Center" style="display: inline-block; margin-right: 10px;">
+  <img src="images/resource%20list.jpg" width="400" alt="Resource List" style="display: inline-block;">
+</p>
+
 ## 项目简介
 
 M3U8D 是一个基于 Python + PyQt6 的 Windows 桌面应用，目标是把“打开页面、保留登录态、捕获媒体请求、选择下载引擎、管理下载任务、通过安装包分发给最终用户”整合到同一个工作流中。
