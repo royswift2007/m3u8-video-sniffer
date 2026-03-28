@@ -8,12 +8,12 @@
 
 
 <p align="center">
-  <img src="images/brower%20workbench.jpg" width="800" alt="Main Interface">
+  <img src="images/resource%20list.jpg" width="800" alt="Main Interface">
 </p>
 
 <p align="center">
-  <img src="images/download%20center.jpg" width="400" alt="Download Center" style="display: inline-block; margin-right: 10px;">
-  <img src="images/resource%20list.jpg" width="400" alt="Resource List" style="display: inline-block;">
+  <img src="images/brower%20workbench.jpg" width="400" alt="Download Center" style="display: inline-block; margin-right: 10px;">
+  <img src="images/download%20center.jpg" width="400" alt="Resource List" style="display: inline-block;">
 </p>
 
 ## 项目简介
