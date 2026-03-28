@@ -1,5 +1,7 @@
 # m3u8 video sniffer v0.2.0
 
+[简体中文](README_zh.md) | English
+
 > A Windows desktop tool for streaming-media sniffing, parsing, downloading, protocol handoff, and installer-based distribution. The current release already provides a full workflow from browser capture to queue-based downloading and packaged installation.
 
 ## Overview
