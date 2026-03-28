@@ -2,6 +2,10 @@
 
 [简体中文](https://github.com/royswift2007/m3u8-video-sniffer/blob/main/README_ZH.md) | English
 
+<p align="center">
+  <a href="README_ZH.md">简体中文</a> | <b>English</b>
+</p>
+
 > A Windows desktop tool for streaming-media sniffing, parsing, downloading, protocol handoff, and installer-based distribution. The current release already provides a full workflow from browser capture to queue-based downloading and packaged installation.
 
 ## Overview
