@@ -1,8 +1,6 @@
 # m3u8 video sniffer v0.2.0
 
-[简体中文](https://github.com/royswift2007/m3u8-video-sniffer/blob/main/README_ZH.md) | English
-
-<p align="center">
+<p align="leftr">
   <a href="README_ZH.md">简体中文</a> | <b>English</b>
 </p>
 
