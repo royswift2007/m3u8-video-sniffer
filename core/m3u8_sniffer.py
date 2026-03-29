@@ -1,4 +1,4 @@
-﻿"""
+"""
 M3U8 resource sniffer for detecting video resources from network requests.
 """
 from datetime import datetime
@@ -9,6 +9,7 @@ from core.task_model import M3U8Resource
 from utils.config_manager import config
 from utils.logger import logger
 from utils.notification import notify_resource_found
+from utils.i18n import TR
 
 
 class M3U8Sniffer:
@@ -45,9 +46,14 @@ class M3U8Sniffer:
                     page_title,
                     candidate_score,
                 )
-                logger.debug("资源已存在，合并上下文" if merged else "资源已存在，跳过", event="sniffer_dedup", url=url, merged=merged)
+                logger.debug(
+                    TR("log_resource_merged") if merged else TR("log_resource_exists"), 
+                    event="sniffer_dedup", 
+                    url=url, 
+                    merged=merged
+                )
                 return existing
-            logger.debug("资源已存在，跳过", event="sniffer_dedup", url=url)
+            logger.debug(TR("log_resource_exists"), event="sniffer_dedup", url=url)
             return None
 
         resource = M3U8Resource(
@@ -61,8 +67,8 @@ class M3U8Sniffer:
         self.resources.append(resource)
         self._seen_urls.add(url)
 
-        logger.info("[FOUND] 发现新资源", event="sniffer_hit", title=resource.title)
-        logger.debug("资源详情", url=url, page=page_url)
+        logger.info(f"[FOUND] {TR('log_new_resource_found')}", event="sniffer_hit", title=resource.title)
+        logger.debug(TR("log_resource_detail"), url=url, page=page_url)
 
         notify_resource_found(resource.title)
 
@@ -75,14 +81,14 @@ class M3U8Sniffer:
         """Clear all resources."""
         self.resources.clear()
         self._seen_urls.clear()
-        logger.info("已清空资源列表")
+        logger.info(TR("log_resources_cleared"))
 
     def remove_resource(self, resource: M3U8Resource):
         """Remove one resource."""
         if resource in self.resources:
             self.resources.remove(resource)
             self._seen_urls.discard(resource.url)
-            logger.info(f"已移除资源: {resource.title}")
+            logger.info(f"{TR('log_resource_removed')}: {resource.title}")
 
     def get_resources(self) -> List[M3U8Resource]:
         """Get a copy of all resources."""
@@ -239,7 +245,7 @@ class M3U8Sniffer:
                 if key not in headers:
                     headers[key] = value
 
-            logger.info(f"[RULE] 应用站点规则: {rule.get('name', 'unknown')}")
+            logger.info(f"[RULE] {TR('log_apply_rule')}: {rule.get('name', 'unknown')}")
             break
 
         return headers

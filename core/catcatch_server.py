@@ -1,4 +1,4 @@
-﻿"""
+"""
 HTTP API server for receiving download requests from CatCatch extension.
 """
 
@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from utils.logger import logger
+from utils.i18n import TR
 
 
 class DownloadRequestHandler(BaseHTTPRequestHandler):
@@ -129,7 +130,7 @@ class DownloadRequestHandler(BaseHTTPRequestHandler):
             self._send_response(400, {"error": "Missing 'url' in request body"})
 
     def _handle_download_request(self, url: str, headers: dict, filename: str):
-        logger.info(f"[HTTP] 收到下载请求: {url}")
+        logger.info(f"[HTTP] {TR('log_http_request_received')}: {url}")
         logger.debug(f"[HTTP] Headers: {headers}")
         logger.debug(f"[HTTP] Filename: {filename}")
 
@@ -143,13 +144,13 @@ class DownloadRequestHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "success",
-                    "message": "下载任务已添加",
+                    "message": TR("log_cli_resource_added"),
                     "url": url,
                 },
             )
         except Exception as e:
             logger.error(
-                f"[HTTP] 处理下载请求失败: {e}",
+                f"[HTTP] {TR('log_http_handle_failed')}: {e}",
                 event="catcatch_handle_download_failed",
                 stage="http_handle_download",
                 error_type=type(e).__name__,
@@ -196,12 +197,12 @@ class CatCatchServer(QObject):
             start_error = self._start_error
 
         if running:
-            logger.info(f"[CatCatch] HTTP 服务已启动: http://localhost:{current_port}")
+            logger.info(f"{TR('log_catcatch_started').replace('{url}', f'http://localhost:{current_port}')}")
         else:
             if not start_error:
                 start_error = "startup timeout"
             logger.error(
-                f"[CatCatch] HTTP 服务启动失败: {start_error}",
+                f"[CatCatch] {TR('log_catcatch_start_failed')}: {start_error}",
                 event="catcatch_start_failed",
                 stage="server_start",
             )
@@ -215,13 +216,13 @@ class CatCatchServer(QObject):
                 server = HTTPServer(("127.0.0.1", port), DownloadRequestHandler)
             except OSError as e:
                 if port == requested_port:
-                    logger.warning(f"[CatCatch] 端口 {port} 被占用，尝试回退端口: {e}")
+                    logger.warning(f"[CatCatch] {TR('log_catcatch_port_occupied').replace('{port}', str(port))}: {e}")
                 else:
-                    logger.debug(f"[CatCatch] 端口 {port} 不可用: {e}")
+                    logger.debug(f"[CatCatch] {TR('log_catcatch_port_unavailable').replace('{port}', str(port))}: {e}")
                 continue
             except Exception as e:
                 logger.error(
-                    f"[CatCatch] 创建 HTTP 服务失败(port={port}): {e}",
+                    f"[CatCatch] {TR('log_catcatch_create_failed').replace('{port}', str(port))}: {e}",
                     event="catcatch_create_server_failed",
                     stage="server_create",
                     error_type=type(e).__name__,
@@ -240,7 +241,7 @@ class CatCatchServer(QObject):
                 server.serve_forever()
             except Exception as e:
                 logger.error(
-                    f"[CatCatch] HTTP 服务运行异常(port={port}): {e}",
+                    f"[CatCatch] {TR('log_catcatch_runtime_exception').replace('{port}', str(port))}: {e}",
                     event="catcatch_server_runtime_failed",
                     stage="serve_forever",
                     error_type=type(e).__name__,
@@ -300,7 +301,7 @@ class CatCatchServer(QObject):
             self.server = None
             self._running = False
 
-        logger.info("[CatCatch] HTTP 服务已停止")
+        logger.info(f"[CatCatch] {TR('log_catcatch_stopped')}")
 
     def is_running(self) -> bool:
         with self._lock:

@@ -1,0 +1,24 @@
+# Python 编译缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# PyInstaller 打包产生的中间文件和最终产物
+build/
+dist/
+*.spec
+
+# 外部二进制工具（如果不需要存入仓库的话）
+bin/
+*.exe
+*.zip
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 编辑器配置
+.vscode/
+.idea/

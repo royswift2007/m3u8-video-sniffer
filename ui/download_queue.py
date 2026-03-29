@@ -1,14 +1,18 @@
-﻿"""
+"""
+Download queue panel for displaying active, completed, and failed downloads
+"""
+"""
 Download queue panel for displaying active, completed, and failed downloads
 """
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QTreeWidget,
                              QTreeWidgetItem, QPushButton, QHBoxLayout,
                              QProgressBar, QHeaderView, QMenu, QMessageBox,
-                             QComboBox, QFrame)
-from PyQt6.QtCore import pyqtSignal, Qt
+                             QComboBox, QFrame, QInputDialog)
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QAction, QCursor
 from core.task_model import DownloadTask
 from utils.logger import logger
+from utils.i18n import i18n, TR
 import subprocess
 import os
 
@@ -30,6 +34,7 @@ class DownloadQueuePanel(QWidget):
         self.tasks = {}  # task_id -> DownloadTask
         self._selected_task_id = None
         self._init_ui()
+        self.retranslate_ui()
     
     def _init_ui(self):
         """初始化 UI"""
@@ -47,13 +52,13 @@ class DownloadQueuePanel(QWidget):
         title_block = QVBoxLayout()
         title_block.setSpacing(2)
 
-        title = QLabel("下载队列")
-        title.setObjectName("section_title")
-        title_block.addWidget(title)
+        self.title_label = QLabel("")
+        self.title_label.setObjectName("section_title")
+        title_block.addWidget(self.title_label)
 
-        intro = QLabel("查看任务状态、下载速度和执行引擎。")
-        intro.setObjectName("panel_intro")
-        title_block.addWidget(intro)
+        self.intro_label = QLabel("")
+        self.intro_label.setObjectName("panel_intro")
+        title_block.addWidget(self.intro_label)
 
         title_layout.addLayout(title_block)
 
@@ -61,7 +66,7 @@ class DownloadQueuePanel(QWidget):
 
         # 状态过滤
         self.status_filter = QComboBox()
-        self.status_filter.addItems(["全部状态", "下载中", "等待中", "已暂停", "失败", "已完成"])
+        self.status_filter.setMinimumWidth(140)
         self.status_filter.currentIndexChanged.connect(self._apply_status_filter)
         title_layout.addWidget(self.status_filter)
 
@@ -69,17 +74,11 @@ class DownloadQueuePanel(QWidget):
         
         # 下载列表
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["文件名", "状态", "进度", "速度", "引擎"])
         self.tree.setColumnWidth(0, 250)
-        self.tree.setColumnWidth(1, 80)
-        self.tree.setColumnWidth(2, 120)
+        self.tree.setColumnWidth(1, 130)
         self.tree.setColumnWidth(2, 120)
         self.tree.setColumnWidth(3, 100)
         self.tree.setFrameShape(QTreeWidget.Shape.NoFrame) # 去除边框
-        # 样式统一由全局样式控制
-        
-        # 表头样式交由全局样式统一管理
-        header = self.tree.header()
         
         # 启用右键菜单
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -91,60 +90,100 @@ class DownloadQueuePanel(QWidget):
         # 控制按钮
         btn_layout = QHBoxLayout()
         
-        self.pause_btn = QPushButton("暂停")
+        self.pause_btn = QPushButton("")
         self.pause_btn.setObjectName("queue_pause_button")
         self.pause_btn.clicked.connect(self._on_pause_selected)
         btn_layout.addWidget(self.pause_btn)
         
-        self.resume_btn = QPushButton("继续")
+        self.resume_btn = QPushButton("")
         self.resume_btn.setObjectName("queue_resume_button")
         self.resume_btn.clicked.connect(self._on_resume_selected)
         btn_layout.addWidget(self.resume_btn)
         
-        self.stop_btn = QPushButton("停止")
+        self.stop_btn = QPushButton("")
         self.stop_btn.setObjectName("queue_stop_button")
         self.stop_btn.clicked.connect(self._on_stop_selected)
         btn_layout.addWidget(self.stop_btn)
         
-        self.delete_btn = QPushButton("删除")
+        self.delete_btn = QPushButton("")
         self.delete_btn.setObjectName("queue_delete_button")
         self.delete_btn.clicked.connect(self._on_delete_selected)
         btn_layout.addWidget(self.delete_btn)
         
-        self.retry_btn = QPushButton("重试")
+        self.retry_btn = QPushButton("")
         self.retry_btn.setObjectName("queue_retry_button")
         self.retry_btn.clicked.connect(self._on_retry_selected)
         btn_layout.addWidget(self.retry_btn)
         
-        self.open_btn = QPushButton("打开位置")
+        self.open_btn = QPushButton("")
         self.open_btn.setObjectName("queue_open_button")
         self.open_btn.clicked.connect(self._on_open_selected)
         btn_layout.addWidget(self.open_btn)
         
-        pause_all_btn = QPushButton("暂停全部")
-        pause_all_btn.setObjectName("queue_pauseall_button")
-        pause_all_btn.clicked.connect(self._on_pause_all)
-        btn_layout.addWidget(pause_all_btn)
+        self.pause_all_btn = QPushButton("")
+        self.pause_all_btn.setObjectName("queue_pauseall_button")
+        self.pause_all_btn.clicked.connect(self._on_pause_all)
+        btn_layout.addWidget(self.pause_all_btn)
         
-        clear_completed_btn = QPushButton("清除已完成")
-        clear_completed_btn.setObjectName("queue_clear_button")
-        clear_completed_btn.clicked.connect(self._on_clear_completed)
-        btn_layout.addWidget(clear_completed_btn)
+        self.clear_completed_btn = QPushButton("")
+        self.clear_completed_btn.setObjectName("queue_clear_button")
+        self.clear_completed_btn.clicked.connect(self._on_clear_completed)
+        btn_layout.addWidget(self.clear_completed_btn)
         
-        sort_status_btn = QPushButton("按状态排序")
-        sort_status_btn.setObjectName("queue_sort_button")
-        sort_status_btn.clicked.connect(self._on_sort_by_status)
-        btn_layout.addWidget(sort_status_btn)
+        self.sort_status_btn = QPushButton("")
+        self.sort_status_btn.setObjectName("queue_sort_button")
+        self.sort_status_btn.clicked.connect(self._on_sort_by_status)
+        btn_layout.addWidget(self.sort_status_btn)
         
-        import_btn = QPushButton("批量导入")
-        import_btn.setObjectName("queue_import_button")
-        import_btn.clicked.connect(self._on_batch_import)
-        btn_layout.addWidget(import_btn)
+        self.import_btn = QPushButton("")
+        self.import_btn.setObjectName("queue_import_button")
+        self.import_btn.clicked.connect(self._on_batch_import)
+        btn_layout.addWidget(self.import_btn)
         
         btn_layout.addStretch()
         panel_layout.addLayout(btn_layout)
         layout.addWidget(panel_card)
         self._refresh_task_action_buttons()
+
+    def retranslate_ui(self):
+        """翻译 UI 文字"""
+        self.title_label.setText(TR("tab_downloading"))
+        self.intro_label.setText(TR("intro_download_queue"))
+        
+        # 过滤器
+        self.status_filter.blockSignals(True)
+        status_idx = self.status_filter.currentIndex()
+        self.status_filter.clear()
+        self.status_filter.addItems([
+            TR("status_all"), TR("status_downloading"), TR("status_waiting"), 
+            TR("status_paused"), TR("status_failed"), TR("status_completed")
+        ])
+        self.status_filter.setCurrentIndex(max(0, status_idx))
+        self.status_filter.blockSignals(False)
+        
+        # 列表头
+        self.tree.setHeaderLabels([
+            TR("col_filename"), TR("col_status"), TR("col_progress"), 
+            TR("col_speed"), TR("col_engine")
+        ])
+        
+        # 按钮
+        self.pause_btn.setText(TR("btn_pause"))
+        self.resume_btn.setText(TR("btn_resume"))
+        self.stop_btn.setText(TR("btn_stop"))
+        self.delete_btn.setText(TR("btn_delete"))
+        self.retry_btn.setText(TR("btn_retry"))
+        self.open_btn.setText(TR("btn_open_folder"))
+        self.pause_all_btn.setText(TR("btn_pause_all"))
+        self.clear_completed_btn.setText(TR("btn_clear_completed"))
+        self.sort_status_btn.setText(TR("btn_sort_status"))
+        self.import_btn.setText(TR("btn_batch_import"))
+        
+        # 刷新所有任务项目的状态文字
+        for task_id, item in self.task_items.items():
+            task = self.tasks.get(task_id)
+            if task:
+                self._update_item(item, task)
     
     def _show_context_menu(self, position):
         """显示右键菜单"""
@@ -167,42 +206,42 @@ class DownloadQueuePanel(QWidget):
         
         # 根据任务状态添加不同的菜单项
         if task.status == "downloading":
-            pause_action = QAction("⏸️ 暂停", self)
+            pause_action = QAction(f"⏸️ {TR('btn_pause')}", self)
             pause_action.triggered.connect(lambda: self._pause_task(task))
             menu.addAction(pause_action)
             
-            stop_action = QAction("⏹️ 停止", self)
+            stop_action = QAction(f"⏹️ {TR('btn_stop')}", self)
             stop_action.triggered.connect(lambda: self._stop_task(task))
             menu.addAction(stop_action)
             
         elif task.status == "paused":
-            resume_action = QAction("▶️ 继续", self)
+            resume_action = QAction(f"▶️ {TR('btn_resume')}", self)
             resume_action.triggered.connect(lambda: self._resume_task(task))
             menu.addAction(resume_action)
             
         elif task.status == "failed":
-            retry_action = QAction("🔄 重试", self)
+            retry_action = QAction(f"🔄 {TR('btn_retry')}", self)
             retry_action.triggered.connect(lambda: self._retry_task(task))
             menu.addAction(retry_action)
             
         elif task.status == "completed":
-            open_action = QAction("📂 打开文件位置", self)
+            open_action = QAction(f"📂 {TR('btn_open_file_location')}", self)
             open_action.triggered.connect(lambda: self._open_file_location(task))
             menu.addAction(open_action)
             
-            play_action = QAction("▶️ 播放", self)
+            play_action = QAction(f"▶️ {TR('btn_play')}", self)
             play_action.triggered.connect(lambda: self._play_file(task))
             menu.addAction(play_action)
         
         menu.addSeparator()
         
         # 通用菜单项
-        copy_url_action = QAction("📋 复制链接", self)
+        copy_url_action = QAction(f"📋 {TR('btn_copy_link')}", self)
         copy_url_action.triggered.connect(lambda: self._copy_url(task))
         menu.addAction(copy_url_action)
         
         # 删除任务（所有状态都可以删除）
-        delete_action = QAction("🗑️ 删除任务", self)
+        delete_action = QAction(f"🗑️ {TR('btn_delete')}", self)
         delete_action.triggered.connect(lambda: self._delete_task(task))
         menu.addAction(delete_action)
         
@@ -283,8 +322,8 @@ class DownloadQueuePanel(QWidget):
     def _stop_task(self, task: DownloadTask):
         """停止任务"""
         reply = QMessageBox.question(
-            self, "确认停止",
-            f"确定要停止下载 \"{task.filename}\" 吗？",
+            self, TR("dialog_confirm_stop"),
+            TR("msg_confirm_stop_task", filename=task.filename),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
@@ -329,7 +368,7 @@ class DownloadQueuePanel(QWidget):
             except Exception as e:
                 logger.error(f"播放文件失败: {e}")
         else:
-            QMessageBox.warning(self, "文件未找到", f"未找到文件: {task.filename}")
+            QMessageBox.warning(self, TR("dialog_file_not_found"), TR("msg_file_not_found", filename=task.filename))
     
     def _copy_url(self, task: DownloadTask):
         """复制链接"""
@@ -340,14 +379,13 @@ class DownloadQueuePanel(QWidget):
     
     def _delete_task(self, task: DownloadTask):
         """删除任务"""
-        msg = f"确定要删除任务 \"{task.filename}\" 吗？\n"
         if task.status == "downloading":
-            msg += "(将停止下载并清理临时文件)"
+            msg = TR("msg_confirm_delete_downloading", filename=task.filename)
         else:
-            msg += "(不会删除已下载的文件)"
+            msg = TR("msg_confirm_delete_task", filename=task.filename)
         
         reply = QMessageBox.question(
-            self, "确认删除",
+            self, TR("dialog_confirm_delete"),
             msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
@@ -360,8 +398,6 @@ class DownloadQueuePanel(QWidget):
             self.remove_task(task)
             
             # 3. 延迟清理临时文件 (3秒后)，确保文件句柄释放
-            # 借鉴 JJH_download.pyw 的成熟方案
-            from PyQt6.QtCore import QTimer
             logger.info(f"已删除任务: {task.filename} (临时文件将在3秒后自动清理)")
             
             # 使用 lambda 捕获 task 对象
@@ -470,7 +506,7 @@ class DownloadQueuePanel(QWidget):
             item.setText(2, f"{task.progress:.1f}%")
         else:
             # 直播流等无进度的任务
-            item.setText(2, task.downloaded_size or "录制中...")
+            item.setText(2, task.downloaded_size or TR("status_recording"))
         
         # 速度
         item.setText(3, task.speed)
@@ -539,21 +575,26 @@ class DownloadQueuePanel(QWidget):
         """按状态过滤队列显示"""
         if not hasattr(self, "status_filter"):
             return
-        selected = self.status_filter.currentText()
-        mapping = {
-            "下载中": "downloading",
-            "等待中": "waiting",
-            "已暂停": "paused",
-            "失败": "failed",
-            "已完成": "completed",
-        }
+        
+        selected_text = self.status_filter.currentText()
+        if not selected_text or selected_text == TR("status_all"):
+            target_status = "all"
+        else:
+            # 根据翻译反查状态键
+            mapping = {
+                TR("status_downloading"): "downloading",
+                TR("status_waiting"): "waiting",
+                TR("status_paused"): "paused",
+                TR("status_failed"): "failed",
+                TR("status_completed"): "completed",
+            }
+            target_status = mapping.get(selected_text, "all")
+
         for task_id, item in self.task_items.items():
             task = self.tasks.get(task_id)
             if not task:
                 continue
-            visible = True
-            if selected != "全部状态":
-                visible = task.status == mapping.get(selected)
+            visible = (target_status == "all" or task.status == target_status)
             item.setHidden(not visible)
         self._refresh_task_action_buttons()
 
@@ -588,12 +629,10 @@ class DownloadQueuePanel(QWidget):
 
     def _on_batch_import(self):
         """批量导入 URL 列表"""
-        from PyQt6.QtWidgets import QInputDialog
-
         text, ok = QInputDialog.getMultiLineText(
             self,
-            "批量导入",
-            "请输入下载链接（每行一个）："
+            TR("dialog_batch_import"),
+            TR("msg_batch_import_hint")
         )
         if not ok or not text.strip():
             return
@@ -605,8 +644,7 @@ class DownloadQueuePanel(QWidget):
         # 仅支持 http(s)/magnet
         valid_urls = [u for u in urls if u.startswith("http://") or u.startswith("https://") or u.startswith("magnet:")]
         if not valid_urls:
-            QMessageBox.warning(self, "无有效链接", "未检测到可用链接（仅支持 http/https/magnet）")
+            QMessageBox.warning(self, TR("dialog_no_valid_urls"), TR("msg_no_valid_urls"))
             return
 
         self.task_batch_imported.emit(valid_urls)
-

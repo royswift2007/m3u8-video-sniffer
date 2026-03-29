@@ -10,12 +10,20 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from core.app_paths import get_app_root, get_bin_path, get_temp_dir, resolve_app_path
+from core.app_paths import get_app_root, get_bin_path, get_temp_dir, is_frozen, resolve_app_path
 from utils.logger import logger
 
 
 class ConfigManager:
     """Application config manager."""
+
+    ENGINE_BIN_MAP = {
+        "n_m3u8dl_re": "N_m3u8DL-RE.exe",
+        "ytdlp": "yt-dlp.exe",
+        "streamlink": "streamlink.exe",
+        "aria2": "aria2c.exe",
+        "ffmpeg": "ffmpeg.exe",
+    }
 
     def __init__(self, config_path: str = "config.json"):
         self.base_dir = get_app_root()
@@ -31,7 +39,10 @@ class ConfigManager:
         if not config_file.exists():
             logger.info("配置文件不存在，使用默认配置")
             self.config = default_config
+            runtime_changed = self._sanitize_runtime_paths()
             self._ensure_directories()
+            if runtime_changed:
+                logger.info("首次运行已完成运行时路径初始化")
             self.save()
             return
 
@@ -44,16 +55,21 @@ class ConfigManager:
                 raise ValueError("配置文件顶层必须是对象")
             merged_config, changed = self._merge_with_defaults(default_config, loaded_config)
             self.config = merged_config
+            runtime_changed = self._sanitize_runtime_paths()
+            changed = changed or runtime_changed
             self._ensure_directories()
             if changed:
-                logger.info("检测到缺省配置项，已自动补齐并保存")
+                logger.info("检测到缺省配置项或运行时路径异常，已自动修正并保存")
                 self.save()
             else:
                 logger.info("配置已加载")
         except Exception as e:
             logger.error(f"加载配置失败: {e}，回退到默认配置")
             self.config = default_config
+            runtime_changed = self._sanitize_runtime_paths()
             self._ensure_directories()
+            if runtime_changed:
+                logger.info("回退默认配置后已完成运行时路径修正")
             self.save()
 
     def save(self):
@@ -164,6 +180,7 @@ class ConfigManager:
             },
             "notification_enabled": True,
             "auto_delete_temp": True,
+            "language": "zh",
             "proxy": {
                 "enabled": False,
                 "http": "",
@@ -201,6 +218,73 @@ class ConfigManager:
 
         return merged, changed
 
+    def _sanitize_runtime_paths(self) -> bool:
+        """Repair polluted runtime paths for installed builds with bundled defaults."""
+        changed = False
+
+        temp_dir = self.config.get("temp_dir")
+        expected_temp_dir = str(get_temp_dir())
+        if not temp_dir or self._is_invalid_runtime_temp_dir(temp_dir):
+            self.config["temp_dir"] = expected_temp_dir
+            changed = True
+            logger.warning(
+                f"检测到 temp_dir 非法或不可用，已修正为运行时目录: {expected_temp_dir}"
+            )
+
+        engines = self.config.get("engines")
+        if not isinstance(engines, dict):
+            return changed
+
+        for engine_key, executable_name in self.ENGINE_BIN_MAP.items():
+            engine_config = engines.get(engine_key)
+            if not isinstance(engine_config, dict):
+                continue
+
+            current_path = engine_config.get("path")
+            expected_path = str(get_bin_path(executable_name))
+            if self._should_repair_engine_path(current_path, expected_path):
+                engine_config["path"] = expected_path
+                changed = True
+                logger.warning(
+                    f"检测到 {engine_key} 引擎路径失效或已污染，已修正为: {expected_path}"
+                )
+
+        return changed
+
+    def _should_repair_engine_path(self, current_path: Any, expected_path: str) -> bool:
+        """Return True if engine path should be reset to current runtime bin path."""
+        expected = Path(expected_path)
+        if not expected.exists():
+            return False
+        if not current_path or not isinstance(current_path, str):
+            return True
+
+        current = Path(current_path)
+        if current == expected and current.exists():
+            return False
+        if not current.exists():
+            return True
+        if is_frozen() and current.resolve() != expected.resolve():
+            return True
+        return False
+
+    def _is_invalid_runtime_temp_dir(self, temp_dir: Any) -> bool:
+        """Return True if temp directory should be reset for current runtime."""
+        if not temp_dir or not isinstance(temp_dir, str):
+            return True
+
+        expected = get_temp_dir()
+        current = Path(temp_dir)
+        if current == expected:
+            return False
+        if is_frozen():
+            try:
+                current.resolve().relative_to(self.base_dir.resolve())
+                return True
+            except Exception:
+                return False
+        return False
+
     def _ensure_directories(self):
         """Ensure download/temp directories exist."""
         try:
@@ -229,6 +313,7 @@ class ConfigManager:
             "max_retry": "引擎最大重试次数(兼容参数)",
             "adaptive": "弱网自适应开关(引擎支持时生效)",
             "output_format": "输出格式，建议 mp4",
+            "language": "界面语言: zh (中文), en (英文)",
         }
 
 

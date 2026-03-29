@@ -1,4 +1,4 @@
-﻿"""
+"""
 M3U8 Video Sniffer application entry.
 """
 
@@ -47,21 +47,27 @@ def main():
         app.setWindowIcon(QIcon(str(icon_path)))
 
     try:
+        from utils.i18n import TR, i18n
+        from utils.config_manager import config
+        
+        # Ensure initial logs use the configured language
+        i18n.set_language(config.get("language", "zh"))
+        
         logger.info("=" * 60)
-        logger.info("M3U8 Video Sniffer 启动中...")
+        logger.info(TR("log_ready"))
         logger.info("=" * 60)
 
         window = MainWindow()
         window.show()
 
         if args.url:
-            logger.info(f"[CLI] 收到外部 URL: {args.url}")
+            logger.info(f"[CLI] {TR('log_cli_received_url')}: {args.url}")
             headers = {}
             if args.headers:
                 try:
                     headers = json.loads(args.headers)
                 except json.JSONDecodeError:
-                    logger.warning(f"[CLI] 无法解析 headers: {args.headers}")
+                    logger.warning(f"[CLI] {TR('log_cli_headers_error')}: {args.headers}")
 
             def add_external_resource():
                 from core.engine_selector import EngineSelector
@@ -71,22 +77,23 @@ def main():
                     url=args.url,
                     headers=headers,
                     page_url=args.url,
-                    title=args.filename or "External Download",
+                    title=args.filename or TR("label_ext_download"),
                 )
 
                 selector = EngineSelector(window.engines)
                 _, engine_name = selector.select(args.url, None)
                 window.resource_panel.add_resource(resource, engine_name)
                 window.main_tabs.setCurrentIndex(1)
-                logger.info(f"[CLI] 已添加资源: {args.filename or args.url}")
+                logger.info(f"[CLI] {TR('log_cli_resource_added')}: {args.filename or args.url}")
 
             QTimer.singleShot(500, add_external_resource)
 
         sys.exit(app.exec())
 
     except Exception as e:
+        from utils.i18n import TR
         logger.critical(
-            f"应用启动失败: {e}",
+            f"{TR('msg_init_failed', error=str(e))}",
             event="app_start_failed",
             stage="main",
             error_type=type(e).__name__,

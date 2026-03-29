@@ -36,19 +36,23 @@ def notify(title: str, message: str, timeout: int = 10):
 
 def notify_resource_found(resource_title: str):
     """资源发现通知"""
-    notify("发现新资源", f"检测到视频: {resource_title}")
+    from utils.i18n import TR
+    notify(TR("notif_resource_found"), TR("msg_detected_video", title=resource_title))
 
 
 def notify_download_started(filename: str, engine: str):
     """下载开始通知"""
-    notify("开始下载", f"{filename}\n使用引擎: {engine}")
+    from utils.i18n import TR
+    notify(TR("notif_download_started"), TR("msg_using_engine", filename=filename, engine=engine))
 
 
 def notify_download_completed(filename: str):
     """下载完成通知"""
-    notify("下载完成", f"{filename}\n点击打开文件夹")
+    from utils.i18n import TR
+    notify(TR("notif_download_completed"), TR("msg_click_open_folder", filename=filename))
 
 
 def notify_download_failed(filename: str, error: str):
     """下载失败通知"""
-    notify("下载失败", f"{filename}\n错误: {error}")
+    from utils.i18n import TR
+    notify(TR("notif_download_failed"), TR("msg_error_detail", filename=filename, error=error))

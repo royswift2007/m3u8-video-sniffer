@@ -1,4 +1,4 @@
-﻿"""
+"""
 Playwright Browser Driver (Qt Compatible)
 Manages the Playwright browser instance in a separate thread.
 """
@@ -11,6 +11,7 @@ from playwright.sync_api import sync_playwright
 from core.sniffer_script import SNIFFER_JS
 from utils.config_manager import config
 from utils.logger import logger
+from utils.i18n import TR
 
 class PlaywrightDriver(QThread):
     """Playwright 驱动线程"""
@@ -96,9 +97,9 @@ class PlaywrightDriver(QThread):
                 if os.path.exists(lock_file):
                     try:
                         os.remove(lock_file)
-                        logger.info("已清理残留的浏览器锁文件")
+                        logger.info(TR("log_pwr_cleanup_lock"))
                     except OSError as e:
-                        logger.debug(f"[PWR-INIT] 清理锁文件失败: path={lock_file} error={e}")
+                        logger.debug(f"[PWR-INIT] {TR('log_pwr_cleanup_lock_fail')}: path={lock_file} error={e}")
                 
                 # 同时检查 SingletonCookie 和 SingletonSocket
                 for lock_name in ["SingletonCookie", "SingletonSocket"]:
@@ -107,7 +108,7 @@ class PlaywrightDriver(QThread):
                         try:
                             os.remove(lock_path)
                         except OSError as e:
-                            logger.debug(f"[PWR-INIT] 清理锁文件失败: path={lock_path} error={e}")
+                            logger.debug(f"[PWR-INIT] {TR('log_pwr_cleanup_lock_fail')}: path={lock_path} error={e}")
 
                 # 启动持久化上下文
                 # 注意：launch_persistent_context 返回的是 Context 并非 Browser
@@ -128,10 +129,10 @@ class PlaywrightDriver(QThread):
                     self.page = self.context.pages[0] # 持久化上下文默认会打开一个页面
                     self.browser = None # persistent_context 模式下没有单独的 browser 对象
                     
-                    logger.info(f"已启动持久化 Chromium (数据目录: {user_data_dir})")
+                    logger.info(f"{TR('log_pwr_started')} ({TR('label_save_path')}: {user_data_dir})")
                 except Exception as e:
                     logger.error(
-                        f"启动失败: {e}",
+                        f"{TR('log_pwr_init_failed')}: {e}",
                         event="playwright_init_failed",
                         stage="launch_persistent_context",
                         error_type=type(e).__name__,
@@ -144,7 +145,7 @@ class PlaywrightDriver(QThread):
                 # === 多标签页支持：监听新标签页创建 ===
                 def on_new_page(new_page):
                     """当用户打开新标签页时，自动设置资源拦截"""
-                    logger.info(f"[Playwright] 检测到新标签页")
+                    logger.info(f"[Playwright] {TR('log_pwr_new_tab')}")
                     self._setup_page(new_page)
                 
                 self.context.on("page", on_new_page)
@@ -160,7 +161,7 @@ class PlaywrightDriver(QThread):
                         target = self._target_url
                         self._target_url = None  # 立即清除，避免重复导航
                         
-                        logger.info(f"[Playwright] 导航到: {target}")
+                        logger.info(f"[Playwright] {TR('log_navigating')}: {target}")
                         self._begin_capture_window("navigate")
                         try:
                             # 使用 domcontentloaded 而不是 load（更快，不等待图片等资源）
@@ -174,7 +175,7 @@ class PlaywrightDriver(QThread):
                             error_msg = str(e).lower()
                             if 'timeout' in error_msg:
                                 logger.warning(
-                                    f"导航超时 (30s)，页面可能仍在加载: {target[:50]}",
+                                    f"{TR('log_pwr_nav_timeout')}: {target[:50]}",
                                     event="playwright_navigate_timeout",
                                     stage="goto",
                                     error_type=type(e).__name__,
@@ -182,7 +183,7 @@ class PlaywrightDriver(QThread):
                                 )
                             elif 'net::' in error_msg:
                                 logger.error(
-                                    f"网络错误: {e}",
+                                    f"{TR('log_pwr_net_error')}: {e}",
                                     event="playwright_navigate_network_error",
                                     stage="goto",
                                     error_type=type(e).__name__,
@@ -190,7 +191,7 @@ class PlaywrightDriver(QThread):
                                 )
                             else:
                                 logger.error(
-                                    f"导航失败: {e}",
+                                    f"{TR('log_pwr_nav_failed')}: {e}",
                                     event="playwright_navigate_failed",
                                     stage="goto",
                                     error_type=type(e).__name__,
@@ -211,11 +212,11 @@ class PlaywrightDriver(QThread):
                                 # 切换到第一个可用页面
                                 self.page = available_pages[0]
                                 self._setup_page(self.page)
-                                logger.info(f"已切换到另一个标签页 (剩余 {len(available_pages)} 个)")
+                                logger.info(f"{TR('log_pwr_switched_tab')} ({TR('label_remaining')} {len(available_pages)})")
                                 last_detected_url = ""  # 重置 URL 检测
                                 continue
                             else:
-                                logger.info("所有标签页已关闭")
+                                logger.info(TR("log_pwr_all_tabs_closed"))
                                 break
                         
                         # === URL 变化检测（用于 SPA 导航）===
@@ -246,7 +247,7 @@ class PlaywrightDriver(QThread):
                                 if available_pages:
                                     self.page = available_pages[0]
                                     self._setup_page(self.page)
-                                    logger.info(f"页面关闭，已切换到另一个标签页")
+                                    logger.info(TR("log_pwr_page_closed_switched"))
                                     last_detected_url = ""
                                     continue
                             except Exception as switch_err:
@@ -256,10 +257,10 @@ class PlaywrightDriver(QThread):
                                     stage="loop",
                                     error_type=type(switch_err).__name__,
                                 )
-                            logger.info("浏览器已关闭 (检测到关闭信号)")
+                            logger.info(TR("log_browser_page_closed"))
                             break
                         else:
-                            logger.error(f"循环异常: {e}")
+                            logger.error(f"{TR('log_pwr_loop_error')}: {e}")
                             break
                         
                 # 清理
@@ -270,7 +271,7 @@ class PlaywrightDriver(QThread):
                         self.browser.close()
                 except Exception as e:
                     logger.debug(
-                        f"[PWR-EXIT] 关闭浏览器上下文异常: {e}",
+                        f"[PWR-EXIT] {TR('log_pwr_shutdown_error')}: {e}",
                         event="playwright_shutdown_error",
                         stage="cleanup",
                         error_type=type(e).__name__,
@@ -279,7 +280,7 @@ class PlaywrightDriver(QThread):
                 
         except Exception as e:
             logger.error(
-                f"Playwright 异常: {e}",
+                f"Playwright {TR('log_error')}: {e}",
                 event="playwright_thread_crash",
                 stage="run",
                 error_type=type(e).__name__,
@@ -293,7 +294,7 @@ class PlaywrightDriver(QThread):
                 return
             if self._remember_page_configured(page):
                 logger.debug(
-                    "[PWR] 页面已配置，跳过重复绑定",
+                    f"[PWR] {TR('log_pwr_page_configured')}",
                     event="playwright_page_already_configured",
                     stage="setup_page",
                 )
@@ -388,7 +389,7 @@ class PlaywrightDriver(QThread):
                             title = title.strip()
                         except Exception as e:
                             logger.debug(
-                                f"[PWR-NAV] 读取页面标题失败: {e}",
+                                f"[PWR-NAV] {TR('log_pwr_read_title_fail')}: {e}",
                                 event="playwright_nav_title_error",
                                 stage="frame_navigated",
                                 error_type=type(e).__name__,
@@ -415,7 +416,7 @@ class PlaywrightDriver(QThread):
                         
                 except Exception as e:
                     logger.debug(
-                        f"[PWR-NAV] 处理导航事件异常: {e}",
+                        f"[PWR-NAV] {TR('log_pwr_nav_event_error')}: {e}",
                         event="playwright_nav_event_error",
                         stage="frame_navigated",
                         error_type=type(e).__name__,
@@ -435,7 +436,7 @@ class PlaywrightDriver(QThread):
                         title = page.title()
                     except Exception as e:
                         logger.debug(
-                            f"[PWR-REQ] 获取页面上下文失败: {e}",
+                            f"[PWR-REQ] {TR('log_pwr_context_fail')}: {e}",
                             event="playwright_request_context_error",
                             stage="request",
                             error_type=type(e).__name__,
@@ -490,7 +491,7 @@ class PlaywrightDriver(QThread):
                             title = page.title()
                         except Exception as e:
                             logger.debug(
-                                f"[PWR-RSP] 获取页面上下文失败: {e}",
+                                f"[PWR-RSP] {TR('log_pwr_context_fail')}: {e}",
                                 event="playwright_response_context_error",
                                 stage="response",
                                 error_type=type(e).__name__,
@@ -510,7 +511,7 @@ class PlaywrightDriver(QThread):
                         self._maybe_extend_capture_window(url, "response_hit")
                 except Exception as e:
                     logger.debug(
-                        f"[PWR-RSP] 响应处理异常: {e}",
+                        f"[PWR-RSP] {TR('log_pwr_response_error')}: {e}",
                         event="playwright_response_error",
                         stage="response",
                         error_type=type(e).__name__,
@@ -540,11 +541,11 @@ class PlaywrightDriver(QThread):
                         counter += 1
                     
                     download.save_as(final_path)
-                    logger.info(f"[PWR] 文件已下载至: {final_path}")
+                    logger.info(f"[PWR] {TR('log_pwr_file_downloaded')}: {final_path}")
                     
                 except Exception as e:
                     logger.error(
-                        f"下载保存失败: {e}",
+                        f"{TR('log_pwr_download_save_failed')}: {e}",
                         event="playwright_download_save_failed",
                         stage="download",
                         error_type=type(e).__name__,
@@ -653,10 +654,10 @@ class PlaywrightDriver(QThread):
             self._next_capture_probe_at = now
             if was_inactive:
                 logger.info(
-                    f"[PWR-CAP] 开始捕获窗口: {self._capture_window_seconds}s ({reason})"
+                    f"[PWR-CAP] {TR('log_pwr_capture_started')}: {self._capture_window_seconds}s ({reason})"
                 )
             else:
-                logger.debug(f"[PWR-CAP] 延长捕获窗口 ({reason})")
+                logger.debug(f"[PWR-CAP] {TR('log_pwr_capture_extended')} ({reason})")
 
     def _maybe_extend_capture_window(self, url: str, reason: str):
         """Extend capture window when a media hit is observed."""

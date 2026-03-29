@@ -3,6 +3,7 @@ yt-dlp engine wrapper for universal video downloads
 """
 import subprocess
 import re
+import time
 from pathlib import Path
 from engines.base_engine import BaseEngine
 from core.task_model import DownloadTask
@@ -14,6 +15,33 @@ class YtdlpEngine(BaseEngine):
     
     # cookies 文件基础目录（缓存）
     _cookies_base_path = None
+
+    def _should_stop(self, task: DownloadTask) -> bool:
+        """检查任务是否已收到停止/暂停/删除信号。"""
+        return bool(getattr(task, "stop_requested", False))
+
+    def _mark_stopped(self, task: DownloadTask):
+        """统一设置停止类任务的错误信息，便于状态机收敛。"""
+        stop_reason = getattr(task, "stop_reason", "")
+        if stop_reason == "paused":
+            task.error_message = "用户暂停"
+        elif stop_reason == "cancelled":
+            task.error_message = "用户取消"
+        elif stop_reason == "removed":
+            task.error_message = "用户删除任务"
+        elif stop_reason == "shutdown":
+            task.error_message = "应用关闭"
+
+    def _terminate_process_if_running(self, task: DownloadTask):
+        """在检测到停止请求时尽快终止当前 yt-dlp 进程。"""
+        process = getattr(task, "process", None)
+        if not process:
+            return
+        try:
+            if process.poll() is None:
+                process.kill()
+        except Exception as e:
+            logger.debug(f"[yt-dlp] 终止进程时忽略异常: {e}")
     
     @classmethod
     def get_cookies_base_path(cls) -> str:
@@ -105,11 +133,16 @@ class YtdlpEngine(BaseEngine):
         # 根据 URL 查找对应的 cookies 文件
         cookies_file = self.get_cookies_file_for_url(task.url)
         has_cookies_file = cookies_file and os.path.exists(cookies_file)
+        is_bilibili = 'bilibili.com' in (task.url or '').lower()
         
         # 第一次尝试：使用手动导出的 cookies 文件（如果存在）
         if has_cookies_file:
             task.headers['_cookie_file'] = cookies_file
             logger.info(f"[yt-dlp] 使用手动导出的 cookies: {cookies_file}")
+
+        if self._should_stop(task):
+            self._mark_stopped(task)
+            return False
         
         success, need_login = self._do_download(
             task,
@@ -118,8 +151,30 @@ class YtdlpEngine(BaseEngine):
             allow_insecure_tls=False
         )
         
-        if success:
-            return True
+        if success or self._should_stop(task):
+            if self._should_stop(task):
+                self._mark_stopped(task)
+            return success
+        
+        # Bilibili 某些视频在未登录时不会直接提示 sign in，而是返回 No video formats found
+        # 但使用浏览器 cookies 可以正常拿到格式，因此这里做一次站点定向降级重试。
+        if is_bilibili and not has_cookies_file:
+            if self._should_stop(task):
+                self._mark_stopped(task)
+                return False
+            logger.warning("[yt-dlp] Bilibili 无 cookies 首次下载失败，怀疑为登录态/站点限制导致的空格式")
+            logger.info("[yt-dlp] 尝试使用 Firefox cookies 作为 Bilibili 备用认证...")
+            success, _ = self._do_download(
+                task,
+                progress_callback,
+                use_browser_cookies='firefox',
+                allow_insecure_tls=False
+            )
+            if success or self._should_stop(task):
+                if self._should_stop(task):
+                    self._mark_stopped(task)
+                return success
+            logger.warning("[yt-dlp] Firefox cookies 备用认证仍失败，问题更可能是 yt-dlp/Bilibili 站点变更或账号权限限制")
         
         # 如果需要登录
         if need_login:
@@ -144,6 +199,9 @@ class YtdlpEngine(BaseEngine):
                 logger.warning(f"[yt-dlp] ⚠️ 需要登录但未找到 cookies 文件！")
                 logger.warning(f"[yt-dlp] 💡 请导出 {expected_file} 并放到程序目录")
             
+            if self._should_stop(task):
+                self._mark_stopped(task)
+                return False
             # 回退到 Firefox cookies
             logger.info(f"[yt-dlp] 尝试使用 Firefox cookies 作为备用...")
             # 清除可能失效的 cookie 文件路径
@@ -154,6 +212,9 @@ class YtdlpEngine(BaseEngine):
                 use_browser_cookies='firefox',
                 allow_insecure_tls=False
             )
+            if self._should_stop(task):
+                self._mark_stopped(task)
+                return False
             return success
         
         return False
@@ -162,7 +223,7 @@ class YtdlpEngine(BaseEngine):
         self,
         task: DownloadTask,
         progress_callback,
-        use_browser_cookies: str = None,
+        use_browser_cookies=None,
         allow_insecure_tls: bool = False
     ) -> tuple:
         """
@@ -171,7 +232,13 @@ class YtdlpEngine(BaseEngine):
             use_browser_cookies: None=只用任务自带cookies, 'chromium'=使用Chromium, 'firefox'=使用Firefox
         Returns: (success: bool, need_login: bool)
         """
+        process = None
+        output_lines = []
         try:
+            if self._should_stop(task):
+                self._mark_stopped(task)
+                return False, False
+
             cmd = self._build_command(
                 task,
                 use_browser_cookies=use_browser_cookies,
@@ -206,9 +273,24 @@ class YtdlpEngine(BaseEngine):
             )
             
             task.process = process
-            output_lines = []
+            stdout = process.stdout
             
-            for line in process.stdout:
+            while True:
+                if self._should_stop(task):
+                    self._mark_stopped(task)
+                    self._terminate_process_if_running(task)
+                    break
+
+                if stdout is None:
+                    break
+
+                line = stdout.readline()
+                if line == "":
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                    continue
+
                 line = line.strip()
                 if line:
                     output_lines.append(line)
@@ -217,8 +299,17 @@ class YtdlpEngine(BaseEngine):
                     if progress_data['progress'] > 0 or progress_data['speed']:
                         progress_callback(progress_data)
             
-            returncode = process.wait()
-            success = returncode == 0
+            if self._should_stop(task):
+                self._mark_stopped(task)
+                self._terminate_process_if_running(task)
+
+            returncode = process.poll()
+            if returncode is None:
+                if self._should_stop(task):
+                    self._mark_stopped(task)
+                    self._terminate_process_if_running(task)
+                returncode = process.wait()
+            success = returncode == 0 and not self._should_stop(task)
             
             # 检测是否需要登录
             need_login = False
@@ -227,7 +318,14 @@ class YtdlpEngine(BaseEngine):
             if not success and any(kw in full_output for kw in login_keywords):
                 need_login = True
 
+            if self._should_stop(task):
+                self._mark_stopped(task)
+                return False, False
+
             if (not success) and (not allow_insecure_tls) and self._is_certificate_error(full_output):
+                if self._should_stop(task):
+                    self._mark_stopped(task)
+                    return False, False
                 logger.warning("[yt-dlp] 检测到证书校验失败，自动启用 --no-check-certificates 重试一次")
                 return self._do_download(
                     task,
@@ -258,11 +356,14 @@ class YtdlpEngine(BaseEngine):
             logger.error(f"[yt-dlp] 下载异常: {e}")
             task.error_message = str(e)
             return False, False
+        finally:
+            if self._should_stop(task):
+                self._terminate_process_if_running(task)
     
     def _build_command(
         self,
         task: DownloadTask,
-        use_browser_cookies: str = None,
+        use_browser_cookies=None,
         allow_insecure_tls: bool = False
     ) -> list:
         """构建下载命令
@@ -273,14 +374,17 @@ class YtdlpEngine(BaseEngine):
         from utils.config_manager import config
         import os
         
-        # 从 URL 中提取格式 ID（如果有）
+        # 从 URL 末尾的 fragment 中提取内部格式选择标记（如果有）
+        # 这里只认程序自己附加的 `#format=`，避免把站点原本合法的 fragment 误当作内部参数。
         url = task.url
         format_id = None
-        
+
         if '#format=' in url:
-            url, format_param = url.split('#format=', 1)
-            format_id = format_param
-            logger.info(f"[yt-dlp] 使用指定格式: {format_id}")
+            base_url, format_param = url.rsplit('#format=', 1)
+            if format_param.isdigit():
+                url = base_url
+                format_id = format_param
+                logger.info(f"[yt-dlp] 使用指定格式: {format_id}")
         
         output_template = str(Path(task.save_dir) / f'{task.filename}.%(ext)s')
         
@@ -397,7 +501,7 @@ class YtdlpEngine(BaseEngine):
 
         return reason, suggestions
 
-    def get_formats(self, url: str, cookie: str = None, use_browser_cookies: bool = False, cookie_file: str = None) -> list:
+    def get_formats(self, url: str, cookie: str | None = None, use_browser_cookies: bool = False, cookie_file: str | None = None) -> list:
         """获取可用格式列表
         
         Args:
@@ -447,12 +551,18 @@ class YtdlpEngine(BaseEngine):
             )
             
             if result.returncode != 0:
-                error_msg = result.stderr[:200] if result.stderr else ''
+                error_output = result.stderr or result.stdout or ''
+                error_msg = error_output[:500]
                 logger.error(f"[yt-dlp] 获取格式失败: {error_msg}")
                 
                 # 如果使用了 cookie 文件但失败，提示可能过期
-                if cookie_file and 'Sign in' in error_msg:
-                    logger.warning("[yt-dlp] ⚠️ cookies 可能已过期，请重新导出 www.youtube.com_cookies.txt")
+                if cookie_file and ('sign in' in error_output.lower() or 'login' in error_output.lower()):
+                    logger.warning("[yt-dlp] ⚠️ cookies 可能已过期，请重新导出对应站点的 cookies 文件")
+                
+                # Bilibili 常见场景：未登录时不明确报登录，而是直接空格式；此时自动回退浏览器 cookies
+                if (not use_browser_cookies) and ('bilibili.com' in (url or '').lower()):
+                    logger.info("[yt-dlp] Bilibili 获取格式失败，尝试使用 Firefox cookies 重试...")
+                    return self.get_formats(url, None, use_browser_cookies=True)
                 
                 # 失败时尝试用 Firefox cookies 重试
                 if not use_browser_cookies:

@@ -201,6 +201,12 @@ QPushButton[objectName="success_button"] {
     background-color: #2f7d60;
 }
 
+QTableWidget QPushButton[objectName="success_button"] {
+    padding: 5px 10px;
+    min-height: 18px;
+    font-size: 9pt;
+}
+
 QPushButton[objectName="success_button"]:hover {
     background-color: #25654e;
 }
@@ -222,11 +228,76 @@ QTreeWidget {
     selection-color: #ffffff;
 }
 
+/* 右上角入口统一：扁平化链接/按钮风格 */
+#language_button,
+#manual_link {
+    color: #1a3a5f;
+    font-weight: 500;
+    font-size: 10pt;
+    padding: 2px 10px; /* 减小上下 padding，增加左右 padding */
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+}
+
+/* 彻底禁用导致变形的默认下拉箭头 */
+#language_button::menu-indicator {
+    image: none;
+    width: 0px;
+}
+
+#language_button:hover,
+#manual_link:hover {
+    color: #2a5a8f;
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+/* 弹出菜单外观美化 */
+QMenu#language_menu {
+    background-color: #ffffff;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    padding: 4px;
+}
+
+QMenu#language_menu::item {
+    padding: 6px 24px;
+    border-radius: 4px;
+    color: #24292e;
+}
+
+QMenu#language_menu::item:selected {
+    background-color: #f6f8fa;
+    color: #0366d6;
+}
+
 QLineEdit,
 QComboBox,
 QSpinBox {
-    padding: 6px 10px;
-    min-height: 28px;
+    padding: 6px 12px;
+    min-height: 30px;
+}
+
+/* 下拉列表整体样式 */
+QComboBox QAbstractItemView {
+    background-color: #fffdf9;
+    border: 1px solid #e4ddd0;
+    border-radius: 8px;
+    padding: 2px; /* 减小列表整体边距 */
+    outline: 0px;
+}
+
+/* 下拉列表中的每一项 */
+QComboBox QAbstractItemView::item {
+    padding: 6px 12px;  /* 减小上下间距（从10px降至6px） */
+    border-radius: 6px;
+    margin: 1px 4px;    /* 减小项间距（从2px降至1px） */
+    min-height: 22px;   /* 减小最小高度 */
+}
+
+QComboBox QAbstractItemView::item:selected {
+    background-color: #22577a;
+    color: #ffffff;
 }
 
 QLineEdit:focus,
@@ -238,6 +309,10 @@ QSpinBox:focus {
 
 QTextEdit {
     padding: 8px 10px;
+}
+
+QTextEdit[objectName="download_center_log_text"] {
+    font-size: 9pt;
 }
 
 QComboBox:hover,
@@ -422,7 +497,7 @@ QLabel[objectName="manual_link"]:hover {
 }
 
 QLabel[objectName="log_label"] {
-    color: #e4ddd2;
+    color: #1f2933;
     font-weight: 600;
 }
 
@@ -440,8 +515,8 @@ QFrame[objectName="card"] {
 }
 
 QFrame[objectName="dark_card"] {
-    background-color: #203040;
-    border: 1px solid #385065;
+    background-color: #ffffff;
+    border: 1px solid #d9dee5;
     border-radius: 12px;
 }
 
@@ -531,8 +606,11 @@ QProgressBar::chunk {
 
 QTextEdit[objectName="log_area"] {
     background-color: transparent;
-    color: #ecede8;
-    font-family: Consolas, "Courier New", monospace;
+    color: #1f2933;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", Consolas, "Courier New", monospace;
+    font-size: 9pt;
     border: none;
+    border-radius: 0px;
+    padding: 4px 6px;
 }
 """

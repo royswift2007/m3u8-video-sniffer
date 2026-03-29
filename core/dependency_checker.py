@@ -32,9 +32,10 @@ class DependencyChecker:
     @staticmethod
     def normalize_category(category: str) -> str:
         """Normalize and validate a manifest category."""
+        from utils.i18n import TR
         normalized_category = str(category).strip().lower()
         if normalized_category not in MANIFEST_CATEGORIES:
-            raise ValueError(f"不支持的依赖分类: {category}")
+            raise ValueError(f"{TR('log_dep_unsupported_category')}: {category}")
         return normalized_category
 
     def check_category(self, category: str) -> list[DependencyCheckResult]:

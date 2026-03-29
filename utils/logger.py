@@ -6,6 +6,7 @@ import sys
 from datetime import datetime
 
 from core.app_paths import get_logs_dir
+from utils.log_retention import CapacityManagedFileHandler
 
 
 class Logger:
@@ -33,7 +34,7 @@ class Logger:
                 log_dir.mkdir(parents=True, exist_ok=True)
                 log_file = log_dir / f"m3u8sniffer_{datetime.now().strftime('%Y%m%d')}.log"
             
-            file_handler = logging.FileHandler(log_file, encoding='utf-8')
+            file_handler = CapacityManagedFileHandler(log_file, encoding='utf-8')
             file_handler.setLevel(logging.DEBUG)
             file_format = logging.Formatter(
                 '%(asctime)s [%(levelname)s] %(message)s',

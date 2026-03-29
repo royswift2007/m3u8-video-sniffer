@@ -1,4 +1,4 @@
-﻿"""
+"""
 Download manager for task queue management and execution.
 """
 
@@ -13,6 +13,7 @@ from core.task_model import DownloadTask
 from core.engine_selector import EngineSelector
 from engines.base_engine import BaseEngine
 from utils.logger import logger
+from utils.i18n import TR
 from utils.notification import (
     notify_download_started,
     notify_download_completed,
@@ -44,31 +45,58 @@ class DownloadManager:
         }
         self._start_workers()
 
-    def add_task(self, task: DownloadTask, user_engine_preference: str = None):
+    def add_task(self, task: DownloadTask, user_engine_preference: str | None = None):
         """Add a download task into queue."""
-        with self._lock:
-            if task in self.active_tasks:
-                logger.info(f"任务正在执行中，跳过重复入队: {task.filename}")
-                return
-            self._remove_task_from_state_lists(task)
-
-        if self._is_task_queued(task):
-            logger.info(f"任务已在队列中，跳过重复入队: {task.filename}")
-            return
-
-        engine, engine_name = self.selector.select(task.url, user_engine_preference)
-        self._reset_task_runtime(task)
-        task.engine = engine_name
-        task.status = "waiting"
-
-        user_specified = user_engine_preference is not None
-        self.task_queue.put((task, engine, user_specified))
         logger.info(
-            f"任务已加入队列: {task.filename} (引擎: {engine_name}, 用户指定: {user_specified})"
+            f"[QUEUE] {TR('log_queue_preparing_add')}",
+            event="download_queue_add_start",
+            filename=getattr(task, "filename", ""),
+            url=getattr(task, "url", ""),
+            user_engine_preference=user_engine_preference or TR("strategy_auto"),
         )
 
-        if self.on_task_update:
-            self.on_task_update(task)
+        try:
+            with self._lock:
+                if task in self.active_tasks:
+                    logger.info(f"{TR('log_queue_executing_skip')}: {task.filename}")
+                    return
+                self._remove_task_from_state_lists(task)
+
+            if self._is_task_queued(task):
+                logger.info(f"{TR('log_queue_exists_skip')}: {task.filename}")
+                return
+
+            engine, engine_name = self.selector.select(task.url, user_engine_preference)
+            if engine is None:
+                raise RuntimeError(f"{TR('msg_engine_not_found_text')}: {user_engine_preference or TR('strategy_auto')}")
+
+            self._reset_task_runtime(task)
+            task.engine = engine_name
+            task.status = "waiting"
+
+            user_specified = user_engine_preference is not None
+            self.task_queue.put((task, engine, user_specified))
+            logger.info(
+                f"{TR('log_queue_added')}: {task.filename} (引擎: {engine_name}, 用户指定: {user_specified})"
+            )
+
+            if self.on_task_update:
+                self.on_task_update(task)
+        except Exception as e:
+            task.status = "failed"
+            task.error_message = str(e)
+            logger.error(
+                f"[QUEUE] {TR('log_queue_add_failed')}: {task.filename} - {e}",
+                event="download_queue_add_failed",
+                filename=getattr(task, "filename", ""),
+                url=getattr(task, "url", ""),
+            )
+            if self.on_task_update:
+                try:
+                    self.on_task_update(task)
+                except Exception as callback_error:
+                    logger.error(f"[QUEUE] {TR('log_queue_callback_failed')}: {callback_error}")
+            raise
 
     def _reset_task_runtime(self, task: DownloadTask):
         """Reset task runtime fields before queueing."""
@@ -150,7 +178,7 @@ class DownloadManager:
             )
             worker.start()
             self._workers.append(worker)
-        logger.info(f"已启动 {self.max_concurrent} 个下载工作线程")
+        logger.info(f"{TR('log_worker_started').replace('{count}', str(self.max_concurrent))}")
 
     def set_max_concurrent(self, new_value: int):
         """Dynamically adjust concurrent worker count."""
@@ -166,9 +194,9 @@ class DownloadManager:
                 )
                 worker.start()
                 self._workers.append(worker)
-            logger.info(f"并发数调整: {old_value} -> {new_value}，已启动新工作线程")
+            logger.info(f"{TR('log_concurrent_adjusted')}: {old_value} -> {new_value}，{TR('log_worker_started_new')}")
         else:
-            logger.info(f"并发数调整: {old_value} -> {new_value}")
+            logger.info(f"{TR('log_concurrent_adjusted')}: {old_value} -> {new_value}")
 
     def _classify_failure(self, message: str) -> str:
         """Roughly classify failure reason."""
@@ -240,11 +268,10 @@ class DownloadManager:
                     task.headers["user-agent"] = user_agent
                     changed = True
                 for k, v in headers.items():
-                    if k and v and not task.headers.get(k):
                         task.headers[k] = v
                         changed = True
                 if changed:
-                    logger.info("已按站点规则补全请求头", event="download_auth_headers", url=task.url)
+                    logger.info(TR("log_auth_headers_updated"), event="download_auth_headers", url=task.url)
                 return changed
 
         return changed
@@ -306,7 +333,7 @@ class DownloadManager:
         best_url = candidates[0][0]
         if best_url != task.url:
             logger.info(
-                "[RANK] 优选下载候选链接",
+                f"[RANK] {TR('log_rank_candidates')}",
                 event="download_candidate_rank",
                 best=best_url,
                 ranked=" | ".join([f"{u} ({s})" for u, s in candidates]),
@@ -345,7 +372,7 @@ class DownloadManager:
                 "failed_total": self._metrics["failed_total"],
             }
         logger.info(
-            "[METRICS] 下载指标更新",
+            f"[METRICS] {TR('log_metrics_updated')}",
             event="download_metrics_snapshot",
             engine=engine,
             stage=stage,
@@ -416,7 +443,7 @@ class DownloadManager:
                 config.config["site_rules"] = site_rules
                 config.save()
                 logger.info(
-                    "[AUTO-RULE] 更新站点规则",
+                    f"[AUTO-RULE] {TR('log_auto_rule_updated')}",
                     event="site_rule_auto_learned",
                     host=host,
                     rule=rule_name,
@@ -425,7 +452,7 @@ class DownloadManager:
 
         if len(site_rules) >= max_rules:
             logger.warning(
-                "[AUTO-RULE] 规则数量已达上限，跳过学习",
+                f"[AUTO-RULE] {TR('log_auto_rule_max_reached')}",
                 event="site_rule_auto_skipped",
                 host=host,
                 reason="max_rules_reached",
@@ -446,7 +473,7 @@ class DownloadManager:
         config.config["site_rules"] = site_rules
         config.save()
         logger.info(
-            "[AUTO-RULE] 新增站点规则",
+            f"[AUTO-RULE] {TR('log_auto_rule_added')}",
             event="site_rule_auto_learned",
             host=host,
             rule=rule_name,
@@ -476,7 +503,7 @@ class DownloadManager:
                     self.task_queue.task_done()
                     got_task = False
             except Exception as e:
-                logger.error(f"工作线程异常: {e}")
+                logger.error(f"{TR('log_worker_exception')}: {e}")
                 if got_task:
                     # Defensive fallback: ensure queue counter does not leak.
                     try:
@@ -487,9 +514,9 @@ class DownloadManager:
     def _execute_download(self, task: DownloadTask, engine: BaseEngine, user_specified: bool = False):
         """Execute one download task with retry/fallback."""
         from utils.config_manager import config
-
+ 
         if self._is_task_stop_requested(task):
-            logger.info(f"[SKIP] 任务已被停止，跳过执行: {task.filename}")
+            logger.info(f"[SKIP] {TR('log_skip_stopped')}: {task.filename}")
             return
 
         task.status = "downloading"
@@ -531,7 +558,7 @@ class DownloadManager:
 
                 if probe_result.get("ok"):
                     logger.info(
-                        "[HLS-PROBE] 预探测通过",
+                        f"[HLS-PROBE] {TR('log_hls_probe_ok')}",
                         event="hls_probe_ok",
                         url=task.url,
                         stage=probe_stage,
@@ -541,7 +568,7 @@ class DownloadManager:
                     probe_error = probe_result.get("error", "unknown")
                     task.error_message = f"HLS probe failed at {probe_stage}: {probe_error}"
                     logger.warning(
-                        "[HLS-PROBE] 预探测失败",
+                        f"[HLS-PROBE] {TR('log_hls_probe_failed')}",
                         event="hls_probe_failed",
                         url=task.url,
                         stage=probe_stage,
@@ -555,7 +582,7 @@ class DownloadManager:
                             self.failed_tasks.append(task)
                         notify_download_failed(task.filename, task.error_message)
                         logger.error(
-                            f"[FAILED] 任务失败: {task.filename}",
+                            f"[FAILED] {TR('log_task_failed')}: {task.filename}",
                             event="download_failed",
                             engine=task.engine,
                             url=task.url,
@@ -570,7 +597,7 @@ class DownloadManager:
                         return
             except Exception as e:
                 logger.warning(
-                    "[HLS-PROBE] 预探测执行异常，继续下载流程",
+                    f"[HLS-PROBE] {TR('log_hls_probe_exception')}",
                     event="hls_probe_exception",
                     url=task.url,
                     error=str(e),
@@ -586,7 +613,7 @@ class DownloadManager:
                 if self.on_task_update:
                     self.on_task_update(task)
             except Exception as e:
-                logger.debug(f"进度更新异常（可忽略）: {e}")
+                logger.debug(f"{TR('log_progress_update_exception')}: {e}")
 
         def _try_download(selected_engine: BaseEngine, engine_name: str) -> bool:
             if self._is_task_stop_requested(task):
@@ -597,7 +624,7 @@ class DownloadManager:
             except Exception as e:
                 task.error_message = str(e)
                 logger.error(
-                    f"[FAILED] 任务异常: {task.filename} - {e}",
+                    f"[FAILED] {TR('log_task_exception')}: {task.filename} - {e}",
                     event="download_engine_exception",
                     engine=engine_name,
                     url=task.url,
@@ -609,11 +636,18 @@ class DownloadManager:
         if user_specified:
             preferred = self.selector.get_engine_by_name(task.engine)
             if preferred:
-                candidates = [(preferred, task.engine)] + [c for c in candidates if c[0] != preferred]
+                auto_candidates = [
+                    (engine, engine.get_name())
+                    for engine in self.engines
+                    if engine != preferred and engine.can_handle(task.url)
+                ]
+                candidates = [(preferred, task.engine)] + auto_candidates
 
         success = False
         last_failure_kind = "unknown"
         last_failure_stage = "unknown"
+        recovered_from_fallback = False
+        recovered_from_engine_name = ""
 
         while task.retry_count <= task.max_retries and not success:
             if self._is_task_stop_requested(task):
@@ -622,17 +656,22 @@ class DownloadManager:
             last_error_message = ""
             last_failure_kind = "unknown"
             last_failure_stage = "unknown"
-            candidate_list = candidates if fallback_enabled else candidates[:1]
+            candidate_list = candidates
+            if not fallback_enabled and not user_specified:
+                candidate_list = candidates[:1]
 
-            for candidate_engine, candidate_name in candidate_list:
+            for candidate_index, (candidate_engine, candidate_name) in enumerate(candidate_list):
                 if self._is_task_stop_requested(task):
                     break
 
                 logger.info(
-                    f"[TRY] 引擎: {candidate_name}，尝试次数: {task.retry_count + 1}/{task.max_retries + 1}"
+                    f"[TRY] {TR('label_engine')}: {candidate_name}，{TR('label_attempts')}: {task.retry_count + 1}/{task.max_retries + 1}"
                 )
                 success = _try_download(candidate_engine, candidate_name)
                 if success:
+                    if candidate_index > 0:
+                        recovered_from_fallback = True
+                        recovered_from_engine_name = candidate_name
                     break
 
                 if self._is_task_stop_requested(task):
@@ -645,7 +684,7 @@ class DownloadManager:
                 last_failure_kind = self._classify_failure(last_error_message)
                 last_failure_stage = self._detect_failure_stage(last_error_message)
                 logger.warning(
-                    f"[RETRY] 失败类型: {last_failure_kind}",
+                    f"[RETRY] {TR('log_failure_kind')}: {last_failure_kind}",
                     event="download_retry",
                     engine=candidate_name,
                     url=task.url,
@@ -663,7 +702,7 @@ class DownloadManager:
 
                             logger.info(
                                 (
-                                    f"[AUTH-RETRY] 同引擎重试: {candidate_name} "
+                                    f"[AUTH-RETRY] {TR('log_auth_retry_same')}: {candidate_name} "
                                     f"({auth_try + 1}/{auth_retry_per_engine})"
                                 ),
                                 event="download_auth_retry",
@@ -679,7 +718,7 @@ class DownloadManager:
                             last_failure_kind = self._classify_failure(last_error_message)
                             last_failure_stage = self._detect_failure_stage(last_error_message)
                             logger.warning(
-                                "[AUTH-RETRY] 同引擎重试失败",
+                                f"[AUTH-RETRY] {TR('log_auth_retry_failed')}",
                                 event="download_auth_retry_failed",
                                 engine=candidate_name,
                                 url=task.url,
@@ -695,8 +734,21 @@ class DownloadManager:
                     if self._is_task_stop_requested(task):
                         break
 
-                if last_failure_kind == "parse" and fallback_enabled:
-                    continue
+                if candidate_index + 1 < len(candidate_list):
+                    if user_specified and candidate_index == 0:
+                        logger.warning(
+                            f"[FALLBACK] {TR('log_fallback_user_engine_failed')}: {candidate_name}",
+                            event="download_fallback_from_user_engine",
+                            engine=task.engine,
+                            fallback_to=candidate_list[candidate_index + 1][1],
+                            url=task.url,
+                            stage=last_failure_stage,
+                            failure_kind=last_failure_kind,
+                        )
+                        user_specified = False
+                        continue
+                    if last_failure_kind == "parse" and fallback_enabled:
+                        continue
 
             if not success:
                 if self._is_task_stop_requested(task):
@@ -720,11 +772,10 @@ class DownloadManager:
 
         stop_reason = getattr(task, "stop_reason", "")
         if stop_reason == "removed":
-            task.status = "removed"
             task.process = None
             with self._lock:
                 self._remove_task_from_state_lists(task)
-            logger.info(f"[REMOVED] 任务已移除: {task.filename}")
+            logger.info(f"[REMOVED] {TR('log_task_removed')}: {task.filename}")
         elif success:
             task.status = "completed"
             task.progress = 100.0
@@ -736,7 +787,17 @@ class DownloadManager:
                 self._remove_task_from_state_lists(task)
                 self.completed_tasks.append(task)
             notify_download_completed(task.filename)
-            logger.info(f"[OK] 任务完成: {task.filename}")
+            logger.info(f"[OK] {TR('log_task_completed')}: {task.filename}")
+            if recovered_from_fallback:
+                logger.warning(
+                    f"[FALLBACK-RECOVERED] 用户指定引擎失败后已成功回退并完成: {task.filename}",
+                    event="download_fallback_recovered",
+                    engine=recovered_from_engine_name,
+                    url=task.url,
+                    original_engine=engine.get_name(),
+                    failure_kind=last_failure_kind,
+                    stage=last_failure_stage,
+                )
         else:
             task.process = None
             if stop_reason == "paused":
@@ -804,6 +865,27 @@ class DownloadManager:
         """Resume task."""
         logger.info(f"正在继续任务: {task.filename}")
         with self._lock:
+            already_active = task in self.active_tasks
+            already_queued = self._is_task_queued(task)
+            process = task.process
+            process_alive = False
+            if process is not None:
+                try:
+                    process_alive = process.poll() is None
+                except Exception:
+                    process_alive = True
+
+            if already_active or already_queued or process_alive:
+                logger.warning(
+                    f"[RESUME-SKIP] 任务仍有旧执行上下文，拒绝重复继续: {task.filename}",
+                    event="resume_task_skipped_reentrant",
+                    active=already_active,
+                    queued=already_queued,
+                    process_alive=process_alive,
+                    url=task.url,
+                )
+                return
+
             self._remove_task_from_state_lists(task)
         self.add_task(task, task.engine or None)
 
@@ -927,7 +1009,7 @@ class DownloadManager:
 
     def shutdown(self):
         """Shutdown download manager and workers."""
-        logger.info("正在关闭下载管理器...")
+        logger.info(TR("log_closing_dl_mgr"))
         self._stop_flag.set()
 
         # Mark and cancel active tasks first.
@@ -966,4 +1048,4 @@ class DownloadManager:
             worker.join(timeout=3.0)
         self._workers = []
 
-        logger.info("下载管理器已关闭")
+        logger.info(TR("log_dl_mgr_closed"))

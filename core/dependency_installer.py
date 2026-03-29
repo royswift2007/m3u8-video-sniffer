@@ -25,6 +25,7 @@ from core.app_paths import (
 )
 from core.dependency_manifest import CATEGORY_LABELS, DependencyEntry, MANIFEST_CATEGORIES
 from utils.logger import logger
+from utils.i18n import TR
 
 DEFAULT_DOWNLOAD_TIMEOUT = 300
 DOWNLOAD_USER_AGENT = "M3U8D Dependency Installer/1.0"
@@ -124,7 +125,7 @@ class DependencyInstallBatchResult:
             if result.error:
                 messages.append(f"{result.label} ({result.target_path}): {result.error}")
             else:
-                messages.append(f"{result.label} ({result.target_path}): 安装失败")
+                messages.append(f"{result.label} ({result.target_path}): {TR('log_dep_install_failed')}")
         return messages
 
 
@@ -217,7 +218,7 @@ class DependencyInstaller:
     def _normalize_category(category: str) -> str:
         normalized_category = str(category).strip().lower()
         if normalized_category not in MANIFEST_CATEGORIES:
-            raise ValueError(f"不支持的依赖分类: {category}")
+            raise ValueError(f"{TR('log_dep_unsupported_category')}: {category}")
         return normalized_category
 
     def _normalize_categories(self, categories: Sequence[str]) -> list[str]:
@@ -231,7 +232,7 @@ class DependencyInstaller:
             normalized_categories.append(normalized_category)
 
         if not normalized_categories:
-            raise ValueError("至少需要一个依赖分类")
+            raise ValueError(TR("log_dep_min_category_required"))
 
         return normalized_categories
 
@@ -240,7 +241,7 @@ class DependencyInstaller:
             payload = json.load(manifest_file)
 
         if not isinstance(payload, dict):
-            raise ValueError("依赖清单顶层必须是对象")
+            raise ValueError(TR("log_dep_manifest_top_object"))
 
         specs_by_id: dict[str, DependencyInstallSpec] = {}
         for category in MANIFEST_CATEGORIES:
@@ -248,21 +249,21 @@ class DependencyInstaller:
             if raw_entries is None:
                 continue
             if not isinstance(raw_entries, list):
-                raise ValueError(f"依赖分类必须是数组: {category}")
+                raise ValueError(f"{TR('log_dep_category_array')}: {category}")
 
             for index, raw_entry in enumerate(raw_entries):
                 if not isinstance(raw_entry, dict):
-                    raise ValueError(f"依赖项必须是对象: {category}[{index}]")
+                    raise ValueError(f"{TR('log_dep_item_object')}: {category}[{index}]")
 
                 dependency_id = str(raw_entry.get("id", "")).strip()
                 relative_path = str(raw_entry.get("path", "")).strip()
                 label = str(raw_entry.get("label") or dependency_id).strip()
                 if not dependency_id or not relative_path:
-                    raise ValueError(f"依赖项缺少 id 或 path: {category}[{index}]")
+                    raise ValueError(f"{TR('log_dep_item_missing_fields')}: {category}[{index}]")
 
                 download = raw_entry.get("download")
                 if download is not None and not isinstance(download, dict):
-                    raise ValueError(f"download 配置必须是对象: {category}[{index}]")
+                    raise ValueError(f"{TR('log_dep_download_object')}: {category}[{index}]")
 
                 specs_by_id[dependency_id] = DependencyInstallSpec(
                     id=dependency_id,
@@ -328,7 +329,7 @@ class DependencyInstaller:
 
         if target_path.exists():
             logger.info(
-                "依赖已存在，跳过下载",
+                TR("log_dep_exists_skip"),
                 dependency=spec.id,
                 target=target_text,
             )
@@ -338,7 +339,7 @@ class DependencyInstaller:
                 current_index=current_index,
                 total_count=total_count,
                 spec=spec,
-                detail="目标文件已存在",
+                detail=TR("log_dep_target_exists_detail"),
             )
             return DependencyInstallItemResult(
                 entry_id=spec.id,
@@ -349,9 +350,9 @@ class DependencyInstaller:
             )
 
         if not spec.download:
-            message = "deps.json 未提供 download 配置"
+            message = TR("log_dep_no_download_config")
             logger.error(
-                "依赖安装失败",
+                TR("log_dep_install_failed"),
                 dependency=spec.id,
                 target=target_text,
                 error=message,
@@ -377,7 +378,7 @@ class DependencyInstaller:
             download_url = self._resolve_download_url(spec.download)
 
             logger.info(
-                "开始安装依赖",
+                TR("log_dep_start_install"),
                 dependency=spec.id,
                 download_type=download_type,
                 target=target_text,
@@ -409,10 +410,10 @@ class DependencyInstaller:
                     total_count,
                 )
             else:
-                raise ValueError(f"不支持的 download.type: {download_type or '<empty>'}")
+                raise ValueError(f"{TR('log_dep_unsupported_download_type')}: {download_type or '<empty>'}")
         except Exception as exc:
             logger.error(
-                "依赖安装失败",
+                TR("log_dep_install_failed"),
                 dependency=spec.id,
                 target=target_text,
                 error=exc,
@@ -434,9 +435,9 @@ class DependencyInstaller:
             )
 
         if not target_path.exists():
-            message = "下载完成后未找到目标文件"
+            message = TR("log_dep_target_not_found_after")
             logger.error(
-                "依赖安装失败",
+                TR("log_dep_install_failed"),
                 dependency=spec.id,
                 target=target_text,
                 error=message,
@@ -458,7 +459,7 @@ class DependencyInstaller:
             )
 
         logger.info(
-            "依赖安装完成",
+            TR("log_dep_install_completed"),
             dependency=spec.id,
             target=target_text,
         )
@@ -468,7 +469,7 @@ class DependencyInstaller:
             current_index=current_index,
             total_count=total_count,
             spec=spec,
-            detail="下载并写入完成",
+            detail=TR("log_dep_write_completed"),
         )
         return DependencyInstallItemResult(
             entry_id=spec.id,
@@ -482,14 +483,14 @@ class DependencyInstaller:
         if source == "direct":
             url = str(download.get("url") or "").strip()
             if not url:
-                raise ValueError("download.url 不能为空")
+                raise ValueError(TR("log_dep_url_required"))
             return url
 
         if source == "github_release":
             repo = str(download.get("repo") or "").strip()
             asset_pattern = str(download.get("asset_pattern") or "").strip()
             if not repo or not asset_pattern:
-                raise ValueError("github_release 下载缺少 repo 或 asset_pattern")
+                raise ValueError(TR("log_dep_github_missing_fields"))
             return self._resolve_latest_github_asset_url(repo, asset_pattern)
 
         raise ValueError(f"不支持的 download.source: {source or '<empty>'}")
@@ -509,7 +510,7 @@ class DependencyInstaller:
 
         assets = payload.get("assets")
         if not isinstance(assets, list):
-            raise ValueError(f"GitHub release 响应缺少 assets: {repo}")
+            raise ValueError(f"{TR('log_dep_github_assets_missing')}: {repo}")
 
         for asset in assets:
             if not isinstance(asset, dict):
@@ -522,7 +523,7 @@ class DependencyInstaller:
                 return asset_url
 
         raise FileNotFoundError(
-            f"未找到匹配的 GitHub 发布资源: {repo} / {asset_pattern}"
+            f"{TR('log_dep_github_asset_not_found')}: {repo} / {asset_pattern}"
         )
 
     def _emit_progress(
@@ -679,7 +680,7 @@ class DependencyInstaller:
         with zipfile.ZipFile(archive_path, "r") as archive_file:
             matched_member = self._find_zip_member(archive_file, member_name)
             if matched_member is None:
-                raise FileNotFoundError(f"压缩包内未找到 {member_name}")
+                raise FileNotFoundError(f"{TR('log_dep_zip_member_not_found')}: {member_name}")
 
             with archive_file.open(matched_member, "r") as source_file:
                 with open(destination, "wb") as output_file:

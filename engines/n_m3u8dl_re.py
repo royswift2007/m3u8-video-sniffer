@@ -18,6 +18,11 @@ class N_m3u8DL_RE_Engine(BaseEngine):
     _supported_options_cache: dict[str, set[str]] = {}
     _warned_unsupported_options: set[str] = set()
 
+    @staticmethod
+    def _log_failure(message: str, *, recoverable: bool, **kwargs):
+        """Emit recoverable/non-recoverable failure logs with chosen level."""
+        (logger.warning if recoverable else logger.error)(message, **kwargs)
+
     def can_handle(self, url: str) -> bool:
         """检测是否适合交给 N_m3u8DL-RE 处理。"""
         url_lower = url.lower()
@@ -84,7 +89,10 @@ class N_m3u8DL_RE_Engine(BaseEngine):
             url_candidates = self._build_url_candidates(task)
             last_error = ""
 
-            for source_url, source_label, allow_select_video in url_candidates:
+            for index, (source_url, source_label, allow_select_video) in enumerate(url_candidates):
+                # 引擎/source 级失败仍属于可恢复诊断信息；
+                # 真正的最终失败由 DownloadManager 统一记为 error。
+                recoverable = True
                 cmd = self._build_command(
                     task,
                     source_url=source_url,
@@ -98,7 +106,13 @@ class N_m3u8DL_RE_Engine(BaseEngine):
                 logger.info(f"[N_m3u8DL-RE] 完整命令: {' '.join(cmd)}")
                 logger.info(f"[N_m3u8DL-RE] 参数列表: {cmd}")
 
-                ok, tail_text = self._run_command(task, cmd, progress_callback, source_label)
+                ok, tail_text = self._run_command(
+                    task,
+                    cmd,
+                    progress_callback,
+                    source_label,
+                    recoverable=recoverable,
+                )
                 if ok:
                     logger.info(
                         f"[N_m3u8DL-RE] 下载完成: {task.filename}",
@@ -124,6 +138,7 @@ class N_m3u8DL_RE_Engine(BaseEngine):
                         safe_cmd,
                         progress_callback,
                         f"{source_label}-safe",
+                        recoverable=recoverable,
                     )
                     if ok_safe:
                         logger.info(
@@ -142,7 +157,10 @@ class N_m3u8DL_RE_Engine(BaseEngine):
                     )
 
             task.error_message = last_error or task.error_message or "N_m3u8DL-RE all source urls failed"
-            logger.error("[N_m3u8DL-RE] 建议检查 Referer/Cookie 或尝试切换引擎")
+            logger.warning(
+                "[N_m3u8DL-RE] 建议检查 Referer/Cookie 或尝试切换引擎",
+                event="nm3u8dlre_all_sources_failed",
+            )
             return False
         except Exception as e:
             logger.error(f"[N_m3u8DL-RE] 下载异常: {e}")
@@ -178,6 +196,7 @@ class N_m3u8DL_RE_Engine(BaseEngine):
         cmd: list[str],
         progress_callback,
         source_label: str,
+        recoverable: bool = False,
     ) -> tuple[bool, str]:
         """Run command once and return (ok, tail_text)."""
         creation_flags = 0
@@ -196,40 +215,46 @@ class N_m3u8DL_RE_Engine(BaseEngine):
 
         task.process = process
         output_lines = []
-        for line in process.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            output_lines.append(line)
-            if "%" in line or "B/s" in line or "iB/s" in line or "Kbps" in line or "Mbps" in line:
-                logger.info(f"[N_m3u8DL-RE RAW] {line}")
-            progress_data = self.parse_progress(line)
-            if progress_data["progress"] > 0 or progress_data["speed"]:
-                logger.debug(
-                    f"[N_m3u8DL-RE PARSED] 进度={progress_data['progress']}% 速度={progress_data['speed']}"
-                )
-                progress_callback(progress_data)
+        stdout = process.stdout
+        if stdout is not None:
+            for line in stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                output_lines.append(line)
+                if "%" in line or "B/s" in line or "iB/s" in line or "Kbps" in line or "Mbps" in line:
+                    logger.info(f"[N_m3u8DL-RE RAW] {line}")
+                progress_data = self.parse_progress(line)
+                if progress_data["progress"] > 0 or progress_data["speed"]:
+                    logger.debug(
+                        f"[N_m3u8DL-RE PARSED] 进度={progress_data['progress']}% 速度={progress_data['speed']}"
+                    )
+                    progress_callback(progress_data)
 
         returncode = process.wait()
         if returncode == 0:
             return True, ""
 
-        logger.error(
+        self._log_failure(
             f"[N_m3u8DL-RE] 下载失败: {task.filename}, 退出码: {returncode}",
+            recoverable=recoverable,
             event="nm3u8dlre_exit_nonzero",
             source=source_label,
         )
         tail_text = ""
         if output_lines:
             tail_text = "\n".join(output_lines[-20:])
-            logger.error("[N_m3u8DL-RE] 输出尾部(20行):\n" + tail_text)
+            self._log_failure(
+                "[N_m3u8DL-RE] 输出尾部(20行):\n" + tail_text,
+                recoverable=recoverable,
+            )
         task.error_message = tail_text or f"N_m3u8DL-RE exit code: {returncode}"
         return False, tail_text
 
     def _build_command(
         self,
         task: DownloadTask,
-        source_url: str = None,
+        source_url: str | None = None,
         safe_mode: bool = False,
         allow_select_video: bool = True,
     ) -> list:

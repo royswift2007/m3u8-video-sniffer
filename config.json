@@ -57,6 +57,7 @@
     },
     "notification_enabled": true,
     "auto_delete_temp": true,
+    "language": "en",
     "proxy": {
         "enabled": false,
         "http": "",
@@ -75,6 +76,7 @@
         "retry_count": "引擎内部重试次数",
         "max_retry": "引擎最大重试次数(兼容参数)",
         "adaptive": "弱网自适应开关(引擎支持时生效)",
-        "output_format": "输出格式，建议 mp4"
+        "output_format": "输出格式，建议 mp4",
+        "language": "界面语言: zh (中文), en (英文)"
     }
 }

@@ -17,6 +17,8 @@ import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
+from utils.log_retention import prune_runtime_logs
+
 API_HOST = "127.0.0.1"
 API_PORT_MIN = 9527
 API_PORT_MAX = 9539
@@ -48,8 +50,10 @@ def log_message(msg: str):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "protocol_handler.log"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    message = f"[{timestamp}] {msg}\n"
+    prune_runtime_logs(log_dir, reserve_bytes=len(message.encode("utf-8")))
     with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {msg}\n")
+        f.write(message)
 
 
 def parse_n_m3u8dl_format(raw_url: str) -> dict:

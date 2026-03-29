@@ -1,4 +1,4 @@
-﻿"""
+"""
 Task data models.
 """
 
@@ -25,6 +25,7 @@ class M3U8Resource:
     quality_label: str = ""
     variants_listed: bool = False
     candidate_score: int = 0
+    selected_engine: Optional[str] = None
 
     def __post_init__(self):
         if not self.title:
@@ -78,11 +79,5 @@ class DownloadTask:
 
     def get_status_display(self) -> str:
         """Return localized display status text."""
-        status_map = {
-            "waiting": "Waiting",
-            "downloading": "Downloading",
-            "completed": "Completed",
-            "failed": "Failed",
-            "paused": "Paused",
-        }
-        return status_map.get(self.status, self.status)
+        from utils.i18n import TR
+        return TR(f"status_{self.status}")

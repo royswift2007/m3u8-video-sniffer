@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTableWidget, QTableWidgetIte
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction
 from utils.logger import logger
+from utils.i18n import i18n, TR
 
 
 class HistoryPanel(QWidget):
@@ -24,6 +25,7 @@ class HistoryPanel(QWidget):
         self.history_file.parent.mkdir(parents=True, exist_ok=True)
         self.history_data = []  # 存储完整的历史记录数据
         self._init_ui()
+        self.retranslate_ui()
         self._load_history()
     
     def _init_ui(self):
@@ -40,22 +42,19 @@ class HistoryPanel(QWidget):
         header_layout = QVBoxLayout()
         header_layout.setSpacing(2)
 
-        title = QLabel("下载历史")
-        title.setObjectName("section_title")
-        header_layout.addWidget(title)
+        self.title_label = QLabel("")
+        self.title_label.setObjectName("section_title")
+        header_layout.addWidget(self.title_label)
 
-        intro = QLabel("保留已完成和失败记录，支持重新发起任务。")
-        intro.setObjectName("panel_intro")
-        header_layout.addWidget(intro)
+        self.intro_label = QLabel("")
+        self.intro_label.setObjectName("panel_intro")
+        header_layout.addWidget(self.intro_label)
 
         panel_layout.addLayout(header_layout)
         
         # 历史记录表格
         self.history_table = QTableWidget()
         self.history_table.setColumnCount(5)
-        self.history_table.setHorizontalHeaderLabels([
-            "文件名", "URL", "状态", "完成时间", "大小"
-        ])
         
         # 设置列宽
         header = self.history_table.horizontalHeader()
@@ -75,11 +74,11 @@ class HistoryPanel(QWidget):
         # 工具栏
         toolbar = QHBoxLayout()
         
-        self.refresh_btn = QPushButton("刷新")
+        self.refresh_btn = QPushButton("")
         self.refresh_btn.setObjectName("secondary_button")
         self.refresh_btn.clicked.connect(self._load_history)
         
-        self.clear_btn = QPushButton("清空历史")
+        self.clear_btn = QPushButton("")
         self.clear_btn.setObjectName("secondary_button")
         self.clear_btn.clicked.connect(self._clear_history)
         
@@ -90,6 +89,30 @@ class HistoryPanel(QWidget):
         panel_layout.addWidget(self.history_table)
         panel_layout.addLayout(toolbar)
         layout.addWidget(panel_card)
+
+    def retranslate_ui(self):
+        """翻译 UI 文字"""
+        self.title_label.setText(TR("tab_history"))
+        self.intro_label.setText(TR("intro_history_panel"))
+        
+        self.refresh_btn.setText(TR("btn_refresh"))
+        self.clear_btn.setText(TR("btn_clear_history"))
+        
+        self.history_table.setHorizontalHeaderLabels([
+            TR("col_filename"), "URL", TR("col_status"), TR("col_time"), TR("col_size")
+        ])
+        
+        # 刷新表格中翻译的状态列
+        for row in range(self.history_table.rowCount()):
+            status_item = self.history_table.item(row, 2)
+            if status_item:
+                raw_status = status_item.data(Qt.ItemDataRole.UserRole) or status_item.text()
+                # 兼容旧数据中的中文状态
+                status_key = f"status_{raw_status.lower()}"
+                if raw_status == "已完成": status_key = "status_completed"
+                elif raw_status == "失败": status_key = "status_failed"
+                
+                self.history_table.item(row, 2).setText(TR(status_key))
     
     def _show_context_menu(self, position):
         """显示右键菜单"""
@@ -101,35 +124,35 @@ class HistoryPanel(QWidget):
         # 创建菜单
         menu = QMenu(self)
         
-        retry_action = QAction("🔄 重新下载", self)
+        retry_action = QAction(f"🔄 {TR('btn_redownload')}", self)
         retry_action.triggered.connect(lambda: self._retry_download(current_row))
         menu.addAction(retry_action)
         
-        open_action = QAction("📂 打开文件位置", self)
+        open_action = QAction(f"📂 {TR('btn_open_file_location')}", self)
         open_action.triggered.connect(lambda: self._open_file_location(current_row))
         menu.addAction(open_action)
         
-        view_log_action = QAction("📄 查看相关日志", self)
+        view_log_action = QAction(f"📄 {TR('btn_view_related_log')}", self)
         view_log_action.triggered.connect(lambda: self._view_related_log(current_row))
         menu.addAction(view_log_action)
         
-        delete_action = QAction("🗑️ 从历史删除", self)
+        delete_action = QAction(f"🗑️ {TR('btn_delete_from_history')}", self)
         delete_action.triggered.connect(lambda: self._delete_record(current_row))
         menu.addAction(delete_action)
         
         menu.addSeparator()
         
-        copy_filename_action = QAction("复制文件名", self)
+        copy_filename_action = QAction(TR("btn_copy_filename"), self)
         copy_filename_action.triggered.connect(lambda: self._copy_cell_data(current_row, 0))
         menu.addAction(copy_filename_action)
         
-        copy_url_action = QAction("复制 URL", self)
+        copy_url_action = QAction(TR("btn_copy_url"), self)
         copy_url_action.triggered.connect(lambda: self._copy_full_url(current_row))
         menu.addAction(copy_url_action)
         
         menu.addSeparator()
         
-        copy_row_action = QAction("复制整行", self)
+        copy_row_action = QAction(TR("btn_copy_row"), self)
         copy_row_action.triggered.connect(lambda: self._copy_row_data(current_row))
         menu.addAction(copy_row_action)
         
@@ -213,10 +236,16 @@ class HistoryPanel(QWidget):
         
         # 状态
         status = record.get('status', 'unknown')
-        status_item = QTableWidgetItem(status)
-        if status == 'completed':
+        status_key = f"status_{status.lower()}"
+        # 兼容旧数据中的中文状态
+        if status == "已完成": status_key = "status_completed"
+        elif status == "失败": status_key = "status_failed"
+        
+        status_item = QTableWidgetItem(TR(status_key))
+        status_item.setData(Qt.ItemDataRole.UserRole, status) # 存储原始状态用于翻译
+        if status in ['completed', '已完成']:
             status_item.setForeground(Qt.GlobalColor.darkGreen)
-        elif status == 'failed':
+        elif status in ['failed', '失败']:
             status_item.setForeground(Qt.GlobalColor.red)
         self.history_table.setItem(row, 2, status_item)
         
@@ -274,7 +303,7 @@ class HistoryPanel(QWidget):
             # 确保目录存在
             self.history_file.parent.mkdir(parents=True, exist_ok=True)
             
-            # 直接写入目标文件（简化逻辑，避免临时文件问题）
+            # 直接写入目标文件
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(history, f, indent=2, ensure_ascii=False)
             
@@ -288,8 +317,8 @@ class HistoryPanel(QWidget):
         """清空历史记录"""
         reply = QMessageBox.question(
             self,
-            "确认清空",
-            "确定要清空所有历史记录吗？",
+            TR("dialog_confirm_clear"),
+            TR("msg_confirm_clear_history"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         
@@ -318,8 +347,8 @@ class HistoryPanel(QWidget):
         record = self.history_data[row]
         reply = QMessageBox.question(
             self,
-            "确认删除",
-            f"确定要从历史记录中删除 \"{record.get('filename', 'N/A')}\" 吗？",
+            TR("dialog_confirm_delete"),
+            TR("msg_confirm_delete_history", filename=record.get('filename', 'N/A')),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
 
@@ -345,7 +374,7 @@ class HistoryPanel(QWidget):
         filename = record.get('filename', '')
         save_dir = record.get('save_dir', '')
         if not filename or not save_dir:
-            QMessageBox.warning(self, "无法打开", "历史记录缺少保存路径信息")
+            QMessageBox.warning(self, TR("dialog_cannot_open"), TR("msg_history_no_path"))
             return
 
         from pathlib import Path
@@ -373,7 +402,7 @@ class HistoryPanel(QWidget):
         record = self.history_data[row]
         filename = record.get('filename', '')
         if not filename:
-            QMessageBox.warning(self, "无法查看", "历史记录缺少文件名")
+            QMessageBox.warning(self, TR("dialog_cannot_view"), TR("msg_history_no_filename"))
             return
 
         import os
@@ -383,12 +412,12 @@ class HistoryPanel(QWidget):
 
         logs_dir = Path(__file__).parent.parent / 'logs'
         if not logs_dir.exists():
-            QMessageBox.warning(self, "无法查看", "日志目录不存在")
+            QMessageBox.warning(self, TR("dialog_cannot_view"), TR("msg_logs_dir_not_exists"))
             return
 
         log_files = sorted(glob.glob(str(logs_dir / '*.log')))
         if not log_files:
-            QMessageBox.warning(self, "无法查看", "未找到日志文件")
+            QMessageBox.warning(self, TR("dialog_cannot_view"), TR("msg_no_log_files"))
             return
 
         latest_log = log_files[-1]

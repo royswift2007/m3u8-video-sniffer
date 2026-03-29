@@ -1,0 +1,20 @@
+[
+  {
+    "id": "01",
+    "url": "https://vv.jisuzyv.com/play/hls/dR66g3Ed/index.m3u8",
+    "expected_download": "Y",
+    "status": "done",
+    "probe_ok": false,
+    "probe_stage": "playlist",
+    "error": "HTTPSConnectionPool(host='vv.jisuzyv.com', port=443): Max retries exceeded with url: /play/hls/dR66g3Ed/index.m3u8 (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x0000012CFFDC17F0>: Failed to establish a new connection: [WinError 10013] 以一种访问权限不允许的方式做了一个访问套接字的尝试。'))"
+  },
+  {
+    "id": "02",
+    "url": "https://vv.jisuzyv.com/play/hls/neg6lyld/index.m3u8",
+    "expected_download": "Y",
+    "status": "done",
+    "probe_ok": false,
+    "probe_stage": "playlist",
+    "error": "HTTPSConnectionPool(host='vv.jisuzyv.com', port=443): Max retries exceeded with url: /play/hls/neg6lyld/index.m3u8 (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x0000012CFFDC96D0>: Failed to establish a new connection: [WinError 10013] 以一种访问权限不允许的方式做了一个访问套接字的尝试。'))"
+  }
+]
