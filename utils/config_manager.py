@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from core.app_paths import get_app_root, get_bin_path, get_temp_dir, is_frozen, resolve_app_path
+from utils.json_store import backup_path_for, corrupt_path_for, write_json_atomic
 from utils.logger import logger
 
 
@@ -35,8 +36,9 @@ class ConfigManager:
         """Load config from disk and merge with defaults."""
         default_config = self._build_default_config()
         config_file = Path(self.config_path)
+        backup_file = backup_path_for(config_file)
 
-        if not config_file.exists():
+        if not config_file.exists() and not backup_file.exists():
             logger.info("配置文件不存在，使用默认配置")
             self.config = default_config
             runtime_changed = self._sanitize_runtime_paths()
@@ -47,8 +49,7 @@ class ConfigManager:
             return
 
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                loaded_config = json.load(f)
+            loaded_config, recovered_from_backup = self._load_saved_config()
             if isinstance(loaded_config, dict):
                 loaded_config.pop("_说明", None)
             else:
@@ -56,7 +57,7 @@ class ConfigManager:
             merged_config, changed = self._merge_with_defaults(default_config, loaded_config)
             self.config = merged_config
             runtime_changed = self._sanitize_runtime_paths()
-            changed = changed or runtime_changed
+            changed = changed or runtime_changed or recovered_from_backup or not backup_file.exists()
             self._ensure_directories()
             if changed:
                 logger.info("检测到缺省配置项或运行时路径异常，已自动修正并保存")
@@ -77,11 +78,51 @@ class ConfigManager:
         try:
             config_with_comments = copy.deepcopy(self.config)
             config_with_comments["_说明"] = self._build_comment_map()
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(config_with_comments, f, indent=4, ensure_ascii=False)
+            write_json_atomic(self.config_path, config_with_comments, indent=4, ensure_ascii=False)
             logger.debug(f"配置已保存: {self.config_path}")
         except Exception as e:
             logger.error(f"保存配置失败: {e}")
+
+    def _load_saved_config(self) -> Tuple[Dict[str, Any], bool]:
+        """Load config JSON from the primary file or its backup."""
+        config_file = Path(self.config_path)
+        backup_file = backup_path_for(config_file)
+        primary_error: Exception | None = None
+
+        if config_file.exists():
+            try:
+                return self._load_json_file(config_file), False
+            except json.JSONDecodeError as exc:
+                primary_error = exc
+                logger.error(f"Primary config is corrupted: {exc}")
+                self._quarantine_corrupted_config(config_file)
+            except Exception as exc:
+                primary_error = exc
+                logger.warning(f"Primary config read failed, trying backup: {exc}")
+
+        if backup_file.exists():
+            logger.warning(f"Recovered config from backup: {backup_file}")
+            return self._load_json_file(backup_file), True
+
+        if primary_error is not None:
+            raise primary_error
+        raise FileNotFoundError(self.config_path)
+
+    def _load_json_file(self, path: Path) -> Dict[str, Any]:
+        """Load a JSON object from disk."""
+        with open(path, "r", encoding="utf-8") as handle:
+            loaded_config = json.load(handle)
+        if isinstance(loaded_config, dict):
+            return loaded_config
+        raise ValueError("Config file top-level value must be an object")
+
+    def _quarantine_corrupted_config(self, path: Path):
+        """Move a corrupted config file aside before recovery."""
+        try:
+            if path.exists():
+                os.replace(path, corrupt_path_for(path))
+        except Exception as exc:
+            logger.error(f"Failed to quarantine corrupted config: {exc}")
 
     def get(self, key: str, default: Any = None) -> Any:
         """Read config by dotted key."""
@@ -143,6 +184,7 @@ class ConfigManager:
                 "download_auth_retry_first": True,
                 "download_auth_retry_per_engine": 1,
                 "download_candidate_ranking_enabled": True,
+                "network_verify_tls": True,
                 "hls_probe_enabled": True,
                 "hls_probe_hard_fail": True,
                 "browser_capture_window_enabled": True,
@@ -306,6 +348,7 @@ class ConfigManager:
             "retry_backoff_seconds": "重试等待秒数",
             "site_rules": "站点规则数组，字段示例: name/domains/url_keywords/referer/user_agent/headers",
             "features": "功能开关集合(sniffer/download/ui)",
+            "network_verify_tls": "是否校验 HTTPS/TLS 证书，默认开启；仅在证书异常且确认可信时关闭",
             "thread_count": "单任务下载线程数，建议 8-16",
             "thread_min": "自适应线程下限",
             "thread_max": "自适应线程上限",
@@ -319,4 +362,3 @@ class ConfigManager:
 
 # 全局配置实例
 config = ConfigManager()
-

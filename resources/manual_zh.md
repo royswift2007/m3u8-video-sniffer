@@ -859,7 +859,26 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 浏览器扩展一键把资源发回桌面程序。
         - 外部脚本或工具调用系统协议。
 
+    猫爪 URL Protocol 推荐设置：
+        - Enable m3u8dl:// Download m3u8 or mpd：N_m3u8DL-RE
+        - Confirm Parameters：启用
+        - Parameter Setting：
+          "${url}" --save-dir "%USERPROFILE%\Downloads\m3u8dl" --save-name "${title}_${now}" ${referer|exists:'-H "Referer:*"'} ${cookie|exists:'-H "Cookie:*"'} --no-log
 
+    配置说明：
+        - `${url}`：猫爪捕获到的真实资源地址。
+        - `--save-dir`：传递给协议内容中的目标保存目录。
+        - `--save-name`：把猫爪标题与时间拼成默认文件名。
+        - `${referer|exists:...}`：若猫爪拿到了 Referer，则自动附带 `-H "Referer:*"`。
+        - `${cookie|exists:...}`：若猫爪拿到了 Cookie，则自动附带 `-H "Cookie:*"`。
+        - `--no-log`：作为兼容透传参数保留，当前协议解析会忽略它，不影响导入。
+
+    使用前提：
+        1. 先执行 scripts\register_protocol.bat 完成 `m3u8dl://` 协议注册。
+        2. 再把以上参数填入猫爪的 URL Protocol m3u8dl 设置。
+        3. 之后在猫爪中发送资源时，程序会自动接收并加入资源列表。
+ 
+ 
 ================================================================================
 11. config.json 全部主要设置项与使用方法
 ================================================================================

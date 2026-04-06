@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTableWidget, QTableWidgetIte
                              QLabel, QFrame)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction
+from utils.json_store import backup_path_for, corrupt_path_for, write_json_atomic
 from utils.logger import logger
 from utils.i18n import i18n, TR
 
@@ -189,12 +190,12 @@ class HistoryPanel(QWidget):
         self.history_table.setRowCount(0)
         self.history_data = []  # 清空并重新加载
         
-        if not self.history_file.exists():
+        backup_file = self._history_backup_file()
+        if not self.history_file.exists() and not backup_file.exists():
             return
         
         try:
-            with open(self.history_file, 'r', encoding='utf-8') as f:
-                history = json.load(f)
+            history, recovered_from_backup = self._load_history_entries()
             
             # 按时间倒序排列
             history.sort(key=lambda x: x.get('completed_at', ''), reverse=True)
@@ -203,24 +204,61 @@ class HistoryPanel(QWidget):
             self.history_data = history
             for record in history:
                 self._add_history_row(record)
+            if recovered_from_backup or not backup_file.exists():
+                self._save_history_entries(history)
                 
-        except json.JSONDecodeError as e:
-            logger.error(f"历史记录文件损坏: {e}")
-            # 备份损坏的文件
-            try:
-                backup_file = self.history_file.with_suffix('.json.bak')
-                import shutil
-                shutil.move(str(self.history_file), str(backup_file))
-                logger.info(f"已备份损坏的历史文件到: {backup_file}")
-            except Exception as backup_error:
-                logger.error(f"备份失败: {backup_error}")
-                try:
-                    self.history_file.unlink()
-                except:
-                    pass
         except Exception as e:
             logger.error(f"加载历史记录失败: {e}")
-    
+
+    def _history_backup_file(self) -> Path:
+        """Return the history backup path."""
+        return backup_path_for(self.history_file)
+
+    def _load_history_entries(self):
+        """Load history entries from the primary file or its backup."""
+        backup_file = self._history_backup_file()
+        primary_error: Exception | None = None
+
+        if self.history_file.exists():
+            try:
+                return self._load_json_file(self.history_file), False
+            except json.JSONDecodeError as exc:
+                primary_error = exc
+                logger.error(f"Primary history is corrupted: {exc}")
+                self._quarantine_corrupted_history()
+            except Exception as exc:
+                primary_error = exc
+                logger.warning(f"Primary history read failed, trying backup: {exc}")
+
+        if backup_file.exists():
+            logger.warning(f"Recovered history from backup: {backup_file}")
+            return self._load_json_file(backup_file), True
+
+        if primary_error is not None:
+            raise primary_error
+        raise FileNotFoundError(self.history_file)
+
+    def _load_json_file(self, path: Path):
+        """Load a JSON array from disk."""
+        with open(path, 'r', encoding='utf-8') as handle:
+            history = json.load(handle)
+        if isinstance(history, list):
+            return history
+        raise ValueError("History file top-level value must be an array")
+
+    def _save_history_entries(self, history: list):
+        """Persist history entries with atomic replace and backup refresh."""
+        self.history_file.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(self.history_file, history, indent=2, ensure_ascii=False)
+
+    def _quarantine_corrupted_history(self):
+        """Move a corrupted history file aside before recovery."""
+        try:
+            if self.history_file.exists():
+                self.history_file.replace(corrupt_path_for(self.history_file))
+        except Exception as exc:
+            logger.error(f"Failed to quarantine corrupted history: {exc}")
+
     def _add_history_row(self, record: dict):
         """添加历史记录行"""
         row = self.history_table.rowCount()
@@ -274,11 +312,11 @@ class HistoryPanel(QWidget):
         try:
             # 加载现有历史
             history = []
-            if self.history_file.exists():
+            backup_file = self._history_backup_file()
+            if self.history_file.exists() or backup_file.exists():
                 try:
-                    with open(self.history_file, 'r', encoding='utf-8') as f:
-                        history = json.load(f)
-                except json.JSONDecodeError:
+                    history, _ = self._load_history_entries()
+                except (json.JSONDecodeError, ValueError):
                     logger.warning("历史记录文件损坏，将创建新文件")
                     history = []
             
@@ -300,12 +338,8 @@ class HistoryPanel(QWidget):
                 record['cookie_file'] = headers.get('_cookie_file')
             history.append(record)
             
-            # 确保目录存在
-            self.history_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 直接写入目标文件
-            with open(self.history_file, 'w', encoding='utf-8') as f:
-                json.dump(history, f, indent=2, ensure_ascii=False)
+            # 原子写入历史及其备份
+            self._save_history_entries(history)
             
             # 刷新显示
             self._load_history()
@@ -324,8 +358,9 @@ class HistoryPanel(QWidget):
         
         if reply == QMessageBox.StandardButton.Yes:
             try:
-                if self.history_file.exists():
-                    self.history_file.unlink()
+                for path in (self.history_file, self._history_backup_file()):
+                    if path.exists():
+                        path.unlink()
                 self.history_table.setRowCount(0)
                 self.history_data = []
                 logger.info("历史记录已清空")
@@ -357,8 +392,7 @@ class HistoryPanel(QWidget):
 
         try:
             self.history_data.pop(row)
-            with open(self.history_file, 'w', encoding='utf-8') as f:
-                json.dump(self.history_data, f, indent=2, ensure_ascii=False)
+            self._save_history_entries(self.history_data)
             self._load_history()
             self.record_deleted.emit(record)
             logger.info("已从历史记录中删除")

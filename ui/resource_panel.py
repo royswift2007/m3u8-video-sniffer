@@ -539,12 +539,25 @@ class ResourcePanel(QWidget):
         
         return ""
     
+    def _find_resource_row(self, resource: M3U8Resource, fallback_row: int = -1) -> int:
+        """Find the current row for a resource object after table mutations."""
+        if 0 <= fallback_row < len(self.resources):
+            current_resource, _engine_name = self.resources[fallback_row]
+            if current_resource is resource:
+                return fallback_row
+
+        for row, (current_resource, _engine_name) in enumerate(self.resources):
+            if current_resource is resource:
+                return row
+        return -1
+
     def _parse_m3u8_variants(self, resource: M3U8Resource, row: int):
         """后台解析 M3U8 master playlist，更新清晰度列"""
         thread = M3U8FetchThread(resource.url, resource.headers)
         
         def on_parsed(variants):
-            if variants and row < self.resource_table.rowCount():
+            current_row = self._find_resource_row(resource, row)
+            if variants and 0 <= current_row < self.resource_table.rowCount():
                 # 缓存到 resource 对象供下载时复用
                 resource.variants = variants
                 
@@ -556,7 +569,7 @@ class ResourcePanel(QWidget):
                     quality_text = f"{len(variants)} variants"
                 
                 # 更新表格清晰度列
-                quality_item = self.resource_table.item(row, 2)
+                quality_item = self.resource_table.item(current_row, 2)
                 if quality_item:
                     quality_item.setText(quality_text)
                     quality_item.setToolTip(f"可用分辨率: {quality_text}")
@@ -567,8 +580,8 @@ class ResourcePanel(QWidget):
                 if not getattr(resource, "variants_listed", False):
                     resource.variants_listed = True
                     engine_name = None
-                    if row < len(self.resources):
-                        engine_name = self.resources[row][1]
+                    if current_row < len(self.resources):
+                        engine_name = self.resources[current_row][1]
                     engine_name = engine_name or TR("strategy_auto")
 
                     for variant in variants:

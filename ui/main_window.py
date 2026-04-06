@@ -22,10 +22,17 @@ from engines.streamlink_engine import StreamlinkEngine
 from engines.aria2_engine import Aria2Engine
 from engines.ffmpeg_processor import FFmpegProcessor
 from core.catcatch_server import CatCatchServer
+from core.app_paths import get_app_root
 from utils.config_manager import config
 from utils.logger import logger
 from core.m3u8_parser import M3U8FetchThread
 from utils.i18n import i18n, TR
+
+APP_VERSION = "0.2.1"
+
+
+def build_main_window_title() -> str:
+    return f"M3U8D v{APP_VERSION}"
 
 
 class MainWindow(QMainWindow):
@@ -35,7 +42,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("M3U8 Video Sniffer - 全能视频下载工具")
+        self.setWindowTitle(build_main_window_title())
         self.setGeometry(100, 100, 1400, 900)
         
         # 应用现代样式
@@ -1057,7 +1064,7 @@ class MainWindow(QMainWindow):
 
     def retranslate_ui(self):
         """刷新界面文字"""
-        self.setWindowTitle(TR("app_title"))
+        self.setWindowTitle(build_main_window_title())
         
         # 标签页
         self.main_tabs.setTabText(0, TR("tab_browser"))
@@ -1220,21 +1227,24 @@ class MainWindow(QMainWindow):
 
     def _run_quick_manual_script(self, script_name: str):
         """Run one .bat script from scripts/ (fallback to project root)."""
-        project_root = Path(__file__).parent.parent
-        script_path = project_root / "scripts" / script_name
+        app_root = get_app_root()
+        script_path = app_root / "scripts" / script_name
         if not script_path.exists():
-            script_path = project_root / script_name
+            script_path = app_root / script_name
         if not script_path.exists():
             QMessageBox.warning(self, "文件不存在", f"未找到脚本：\n{script_path}")
             return
 
         try:
-            import os
             import subprocess
             import platform
 
             if platform.system() == "Windows":
-                os.startfile(str(script_path))
+                subprocess.Popen(
+                    ["cmd.exe", "/K", str(script_path)],
+                    cwd=str(script_path.parent),
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                )
             else:
                 subprocess.Popen([str(script_path)], cwd=str(script_path.parent))
 

@@ -4,11 +4,11 @@ Download manager for task queue management and execution.
 
 from queue import Empty, Queue
 import threading
-import time
 from datetime import datetime
 from typing import Callable, List
 from urllib.parse import urlparse
 
+from core.site_rule_utils import set_header_if_missing, site_rule_matches
 from core.task_model import DownloadTask
 from core.engine_selector import EngineSelector
 from engines.base_engine import BaseEngine
@@ -36,6 +36,8 @@ class DownloadManager:
         self._workers = []
         self._stop_flag = threading.Event()
         self._lock = threading.Lock()
+        self._worker_gate = threading.Condition()
+        self._running_slots = 0
         self.on_task_update: Callable | None = None
         self._metrics = {
             "success_total": 0,
@@ -76,6 +78,7 @@ class DownloadManager:
 
             user_specified = user_engine_preference is not None
             self.task_queue.put((task, engine, user_specified))
+            self._notify_workers()
             logger.info(
                 f"{TR('log_queue_added')}: {task.filename} (引擎: {engine_name}, 用户指定: {user_specified})"
             )
@@ -153,6 +156,8 @@ class DownloadManager:
                 if self.task_queue.unfinished_tasks == 0:
                     self.task_queue.all_tasks_done.notify_all()
                 self.task_queue.not_full.notify_all()
+        if removed:
+            self._notify_workers()
         return removed
 
     @staticmethod
@@ -180,6 +185,11 @@ class DownloadManager:
             self._workers.append(worker)
         logger.info(f"{TR('log_worker_started').replace('{count}', str(self.max_concurrent))}")
 
+    def _notify_workers(self):
+        """Wake workers after queue or concurrency state changes."""
+        with self._worker_gate:
+            self._worker_gate.notify_all()
+
     def set_max_concurrent(self, new_value: int):
         """Dynamically adjust concurrent worker count."""
         old_value = self.max_concurrent
@@ -197,6 +207,8 @@ class DownloadManager:
             logger.info(f"{TR('log_concurrent_adjusted')}: {old_value} -> {new_value}，{TR('log_worker_started_new')}")
         else:
             logger.info(f"{TR('log_concurrent_adjusted')}: {old_value} -> {new_value}")
+
+        self._notify_workers()
 
     def _classify_failure(self, message: str) -> str:
         """Roughly classify failure reason."""
@@ -249,30 +261,28 @@ class DownloadManager:
         from utils.config_manager import config
 
         site_rules = config.get("site_rules", []) or []
-        url_lower = (task.url or "").lower()
+        task.headers = dict(task.headers or {})
+        page_url = task.headers.get("referer", "")
         changed = False
 
         for rule in site_rules:
-            domains = [d.lower() for d in rule.get("domains", [])]
-            if not domains:
+            if not rule.get("domains"):
                 continue
-            if any(d in url_lower for d in domains):
-                referer = rule.get("referer")
-                user_agent = rule.get("user_agent")
-                headers = rule.get("headers", {}) or {}
+            if not site_rule_matches(rule, task.url, page_url):
+                continue
 
-                if referer and not task.headers.get("referer"):
-                    task.headers["referer"] = referer
-                    changed = True
-                if user_agent and not task.headers.get("user-agent"):
-                    task.headers["user-agent"] = user_agent
-                    changed = True
-                for k, v in headers.items():
-                        task.headers[k] = v
-                        changed = True
-                if changed:
-                    logger.info(TR("log_auth_headers_updated"), event="download_auth_headers", url=task.url)
-                return changed
+            referer = rule.get("referer")
+            user_agent = rule.get("user_agent")
+            headers = rule.get("headers", {}) or {}
+
+            changed = set_header_if_missing(task.headers, "referer", referer) or changed
+            changed = set_header_if_missing(task.headers, "user-agent", user_agent) or changed
+            for key, value in headers.items():
+                changed = set_header_if_missing(task.headers, key, value) or changed
+
+            if changed:
+                logger.info(TR("log_auth_headers_updated"), event="download_auth_headers", url=task.url)
+            return changed
 
         return changed
 
@@ -482,17 +492,30 @@ class DownloadManager:
     def _worker(self):
         """Worker thread loop."""
         while not self._stop_flag.is_set():
+            reserved_slot = False
             got_task = False
             try:
-                with self._lock:
-                    active_count = len(self.active_tasks)
-
-                if active_count >= self.max_concurrent:
-                    time.sleep(0.5)
-                    continue
-
                 try:
-                    task, engine, user_specified = self.task_queue.get(timeout=1.0)
+                    with self._worker_gate:
+                        while not self._stop_flag.is_set():
+                            if self.max_concurrent <= 0:
+                                self._worker_gate.wait(timeout=0.2)
+                                continue
+                            if self._running_slots >= self.max_concurrent:
+                                self._worker_gate.wait(timeout=0.2)
+                                continue
+                            with self.task_queue.mutex:
+                                has_queued_tasks = bool(self.task_queue.queue)
+                            if not has_queued_tasks:
+                                self._worker_gate.wait(timeout=0.2)
+                                continue
+                            self._running_slots += 1
+                            reserved_slot = True
+                            break
+                    if not reserved_slot:
+                        continue
+
+                    task, engine, user_specified = self.task_queue.get_nowait()
                 except Empty:
                     continue
                 got_task = True
@@ -510,6 +533,11 @@ class DownloadManager:
                         self.task_queue.task_done()
                     except Exception:
                         pass
+            finally:
+                if reserved_slot:
+                    with self._worker_gate:
+                        self._running_slots = max(0, self._running_slots - 1)
+                        self._worker_gate.notify_all()
 
     def _execute_download(self, task: DownloadTask, engine: BaseEngine, user_specified: bool = False):
         """Execute one download task with retry/fallback."""
@@ -1011,6 +1039,7 @@ class DownloadManager:
         """Shutdown download manager and workers."""
         logger.info(TR("log_closing_dl_mgr"))
         self._stop_flag.set()
+        self._notify_workers()
 
         # Mark and cancel active tasks first.
         for task in list(self.active_tasks):
@@ -1035,6 +1064,7 @@ class DownloadManager:
             if self.task_queue.unfinished_tasks == 0:
                 self.task_queue.all_tasks_done.notify_all()
             self.task_queue.not_full.notify_all()
+        self._notify_workers()
 
         for task in drained_tasks:
             task.stop_requested = True

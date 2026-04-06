@@ -1,5 +1,5 @@
 #define AppName "M3U8D"
-#define AppVersion "0.2.0"
+#define AppVersion "0.2.1"
 #define RepoRoot ".."
 #define BuildRoot "..\dist\M3U8D"
 #define MainExeName "M3U8D.exe"

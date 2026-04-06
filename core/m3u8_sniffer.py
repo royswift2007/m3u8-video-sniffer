@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Callable, List, Optional
 from urllib.parse import urlparse
 
+from core.site_rule_utils import set_header_if_missing, site_rule_matches
 from core.task_model import M3U8Resource
 from utils.config_manager import config
 from utils.logger import logger
@@ -223,27 +224,16 @@ class M3U8Sniffer:
         if not self._site_rules:
             return headers
 
-        url_lower = (url or "").lower()
-        page_lower = (page_url or "").lower()
-
         for rule in self._site_rules:
-            domains = [d.lower() for d in rule.get("domains", [])]
-            url_keywords = [k.lower() for k in rule.get("url_keywords", [])]
-
-            if domains and not any(d in url_lower or d in page_lower for d in domains):
-                continue
-            if url_keywords and not any(k in url_lower for k in url_keywords):
+            if not site_rule_matches(rule, url, page_url):
                 continue
 
-            if rule.get("referer") and not headers.get("referer"):
-                headers["referer"] = rule.get("referer")
-            if rule.get("user_agent") and not headers.get("user-agent"):
-                headers["user-agent"] = rule.get("user_agent")
+            set_header_if_missing(headers, "referer", rule.get("referer"))
+            set_header_if_missing(headers, "user-agent", rule.get("user_agent"))
 
             extra_headers = rule.get("headers", {}) or {}
             for key, value in extra_headers.items():
-                if key not in headers:
-                    headers[key] = value
+                set_header_if_missing(headers, key, value)
 
             logger.info(f"[RULE] {TR('log_apply_rule')}: {rule.get('name', 'unknown')}")
             break

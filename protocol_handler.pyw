@@ -224,10 +224,10 @@ def _resolve_main_command() -> list[str]:
         return [str(app_root / "M3U8D.exe")]
 
     python_exe = _resolve_python_executable()
-    for candidate in (app_root / "mvs.pyw", app_root / "main.py"):
+    for candidate in (app_root / "main.py", app_root / "mvs.pyw"):
         if candidate.exists():
             return [python_exe, str(candidate)]
-    return [python_exe, str(app_root / "mvs.pyw")]
+    return [python_exe, str(app_root / "main.py")]
 
 
 def _format_command(args: list[str]) -> str:
@@ -278,7 +278,7 @@ def launch_app_with_url(url: str, headers: dict, filename: str) -> bool:
         time.sleep(0.5)
 
     log_message("主程序已启动但在等待窗口内未完成投递")
-    return True
+    return False
 
 
 def main():

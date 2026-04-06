@@ -2,12 +2,18 @@
 Playwright Browser Driver (Qt Compatible)
 Manages the Playwright browser instance in a separate thread.
 """
+import shutil
 import sys
 import json
 import time
 from urllib.parse import urljoin, urlparse
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 from playwright.sync_api import sync_playwright
+from core.playwright_profile import (
+    create_temporary_user_data_dir,
+    get_primary_user_data_dir,
+    is_profile_lock_error,
+)
 from core.sniffer_script import SNIFFER_JS
 from utils.config_manager import config
 from utils.logger import logger
@@ -39,6 +45,8 @@ class PlaywrightDriver(QThread):
         self._next_capture_probe_at = 0.0
         self._recent_emit_cache = {}
         self._configured_page_ids = set()
+        self._context_user_data_dir = None
+        self._temporary_profile_dir = None
         self._load_capture_settings()
 
     def _remember_page_configured(self, page) -> bool:
@@ -84,52 +92,15 @@ class PlaywrightDriver(QThread):
         try:
             with sync_playwright() as p:
                 self.playwright = p
-                
-                # 定义用户数据目录 (用于持久化 Cookie 和 Session，减少验证码)
-                import os
-                user_data_dir = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "M3U8VideoSniffer", "chromium_user_data")
-                if not os.path.exists(user_data_dir):
-                    os.makedirs(user_data_dir, exist_ok=True)
-                
-                # === 清理可能的残留锁文件 ===
-                # 持久化上下文有时会因为异常退出而留下锁文件
-                lock_file = os.path.join(user_data_dir, "SingletonLock")
-                if os.path.exists(lock_file):
-                    try:
-                        os.remove(lock_file)
-                        logger.info(TR("log_pwr_cleanup_lock"))
-                    except OSError as e:
-                        logger.debug(f"[PWR-INIT] {TR('log_pwr_cleanup_lock_fail')}: path={lock_file} error={e}")
-                
-                # 同时检查 SingletonCookie 和 SingletonSocket
-                for lock_name in ["SingletonCookie", "SingletonSocket"]:
-                    lock_path = os.path.join(user_data_dir, lock_name)
-                    if os.path.exists(lock_path):
-                        try:
-                            os.remove(lock_path)
-                        except OSError as e:
-                            logger.debug(f"[PWR-INIT] {TR('log_pwr_cleanup_lock_fail')}: path={lock_path} error={e}")
 
                 # 启动持久化上下文
                 # 注意：launch_persistent_context 返回的是 Context 并非 Browser
                 try:
-                    self.context = self.playwright.chromium.launch_persistent_context(
-                        user_data_dir,
-                        channel="chrome",  # 恢复使用官方 Chrome
-                        headless=self.headless,
-                        args=[
-                            "--disable-blink-features=AutomationControlled", 
-                            "--start-maximized",
-                            "--no-default-browser-check"
-                        ],
-                        ignore_default_args=["--enable-automation", "--disable-extensions"], # 关键：防止屏蔽扩展
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                        no_viewport=True
-                    )
+                    self.context = self._launch_persistent_context()
                     self.page = self.context.pages[0] # 持久化上下文默认会打开一个页面
                     self.browser = None # persistent_context 模式下没有单独的 browser 对象
                     
-                    logger.info(f"{TR('log_pwr_started')} ({TR('label_save_path')}: {user_data_dir})")
+                    logger.info(f"{TR('log_pwr_started')} ({TR('label_save_path')}: {self._context_user_data_dir})")
                 except Exception as e:
                     logger.error(
                         f"{TR('log_pwr_init_failed')}: {e}",
@@ -276,6 +247,8 @@ class PlaywrightDriver(QThread):
                         stage="cleanup",
                         error_type=type(e).__name__,
                     )
+                finally:
+                    self._cleanup_temporary_profile_dir()
                 self.page_closed.emit()
                 
         except Exception as e:
@@ -286,6 +259,53 @@ class PlaywrightDriver(QThread):
                 error_type=type(e).__name__,
             )
             self.error_occurred.emit(str(e))
+
+    def _launch_persistent_context(self):
+        """Launch the persistent browser context with safe profile fallback."""
+        primary_profile_dir = get_primary_user_data_dir()
+        primary_profile_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            self._context_user_data_dir = primary_profile_dir
+            return self._launch_context_with_profile(primary_profile_dir)
+        except Exception as exc:
+            if not is_profile_lock_error(exc):
+                raise
+
+            fallback_profile_dir = create_temporary_user_data_dir()
+            self._temporary_profile_dir = fallback_profile_dir
+            self._context_user_data_dir = fallback_profile_dir
+            logger.warning(
+                f"[PWR-INIT] Browser profile is busy, falling back to isolated profile: {fallback_profile_dir}",
+                event="playwright_profile_busy_fallback",
+                stage="launch_persistent_context",
+            )
+            return self._launch_context_with_profile(fallback_profile_dir)
+
+    def _launch_context_with_profile(self, user_data_dir):
+        """Launch Chromium persistent context against the given user data dir."""
+        return self.playwright.chromium.launch_persistent_context(
+            str(user_data_dir),
+            channel="chrome",  # 恢复使用官方 Chrome
+            headless=self.headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--start-maximized",
+                "--no-default-browser-check"
+            ],
+            ignore_default_args=["--enable-automation", "--disable-extensions"], # 关键：防止屏蔽扩展
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            no_viewport=True
+        )
+
+    def _cleanup_temporary_profile_dir(self):
+        """Delete isolated fallback profiles created for this session."""
+        if not self._temporary_profile_dir:
+            return
+        try:
+            shutil.rmtree(self._temporary_profile_dir, ignore_errors=True)
+        finally:
+            self._temporary_profile_dir = None
     
     def _setup_page(self, page):
         """配置页面拦截与脚本"""

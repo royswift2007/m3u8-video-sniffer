@@ -7,6 +7,9 @@ from urllib.parse import urljoin
 
 import requests
 
+from utils.config_manager import config
+from utils.logger import logger
+
 
 class HLSProbe:
     """Lightweight HLS probe: playlist -> key -> first segment."""
@@ -14,8 +17,11 @@ class HLSProbe:
     @classmethod
     def probe(cls, url: str, headers: dict | None = None, timeout: int = 8) -> dict:
         headers = (headers or {}).copy()
+        verify_tls = bool(config.get("features.network_verify_tls", True))
         if "User-Agent" not in headers and "user-agent" not in headers:
             headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        if not verify_tls:
+            logger.warning("[HLSProbe] TLS verification disabled by config")
 
         result = {
             "ok": False,
@@ -29,7 +35,7 @@ class HLSProbe:
 
         try:
             # 1) playlist fetch
-            playlist_resp = requests.get(url, headers=headers, timeout=timeout, verify=False)
+            playlist_resp = requests.get(url, headers=headers, timeout=timeout, verify=verify_tls)
             result["status_code"] = getattr(playlist_resp, "status_code", None)
             playlist_resp.raise_for_status()
             playlist_text = playlist_resp.text or ""
@@ -43,7 +49,7 @@ class HLSProbe:
                     result["stage"] = "playlist"
                     result["error"] = "master playlist has no resolvable variant"
                     return result
-                playlist_resp = requests.get(first_variant, headers=headers, timeout=timeout, verify=False)
+                playlist_resp = requests.get(first_variant, headers=headers, timeout=timeout, verify=verify_tls)
                 result["status_code"] = getattr(playlist_resp, "status_code", None)
                 playlist_resp.raise_for_status()
                 playlist_text = playlist_resp.text or ""
@@ -63,7 +69,7 @@ class HLSProbe:
             if key_url:
                 result["stage"] = "key"
                 result["key_url"] = key_url
-                key_resp = requests.get(key_url, headers=headers, timeout=timeout, verify=False)
+                key_resp = requests.get(key_url, headers=headers, timeout=timeout, verify=verify_tls)
                 key_resp.raise_for_status()
 
             # 3) first segment fetch (small range)
@@ -71,7 +77,13 @@ class HLSProbe:
             seg_headers = headers.copy()
             if "Range" not in seg_headers and "range" not in seg_headers:
                 seg_headers["Range"] = "bytes=0-2047"
-            seg_resp = requests.get(first_segment, headers=seg_headers, timeout=timeout, verify=False, stream=True)
+            seg_resp = requests.get(
+                first_segment,
+                headers=seg_headers,
+                timeout=timeout,
+                verify=verify_tls,
+                stream=True,
+            )
             seg_resp.raise_for_status()
             seg_resp.close()
 

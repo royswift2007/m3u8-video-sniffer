@@ -27,6 +27,8 @@ class M3U8FetchThread(QThread):
         self._last_response_info = {}
         feature_flags = config.get("features", {}) or {}
         self._max_nested_depth = max(1, min(5, int(feature_flags.get("m3u8_nested_depth", 3))))
+        self._verify_tls = bool(feature_flags.get("network_verify_tls", True))
+        self._tls_warning_emitted = False
 
     def run(self):
         try:
@@ -93,7 +95,10 @@ class M3U8FetchThread(QThread):
             self.finished.emit([])
 
     def _fetch_once(self, url: str, headers: dict) -> str:
-        response = requests.get(url, headers=headers, timeout=10, verify=False)
+        if not self._verify_tls and not self._tls_warning_emitted:
+            logger.warning("[M3U8] TLS verification disabled by config")
+            self._tls_warning_emitted = True
+        response = requests.get(url, headers=headers, timeout=10, verify=self._verify_tls)
         response.raise_for_status()
         self._last_response_info = {
             "status_code": getattr(response, "status_code", None),

@@ -859,7 +859,26 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
         - A browser extension sends resources back to the desktop program with one click.
         - An external script or tool calls the system protocol.
 
+    Recommended CatCatch URL Protocol settings:
+        - Enable m3u8dl:// Download m3u8 or mpd: N_m3u8DL-RE
+        - Confirm Parameters: Enabled
+        - Parameter Setting:
+          "${url}" --save-dir "%USERPROFILE%\Downloads\m3u8dl" --save-name "${title}_${now}" ${referer|exists:'-H "Referer:*"'} ${cookie|exists:'-H "Cookie:*"'} --no-log
 
+    Setting notes:
+        - `${url}`: the real resource URL captured by CatCatch.
+        - `--save-dir`: passes the target output directory through the protocol payload.
+        - `--save-name`: combines the CatCatch title and timestamp into the default file name.
+        - `${referer|exists:...}`: if CatCatch has a Referer, it appends `-H "Referer:*"` automatically.
+        - `${cookie|exists:...}`: if CatCatch has a Cookie, it appends `-H "Cookie:*"` automatically.
+        - `--no-log`: kept as a compatibility passthrough flag; the current protocol parser ignores it safely.
+
+    Prerequisites:
+        1. Run scripts\register_protocol.bat first to register the `m3u8dl://` protocol.
+        2. Then paste the settings above into CatCatch's URL Protocol m3u8dl configuration.
+        3. After that, sending a resource from CatCatch will automatically hand it to the app and insert it into the resource list.
+ 
+ 
 ================================================================================
 11. All Major `config.json` Settings and How to Use Them
 ================================================================================

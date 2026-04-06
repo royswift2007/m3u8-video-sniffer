@@ -17,6 +17,13 @@ import subprocess
 import os
 
 
+def _task_owns_artifact(task: DownloadTask, artifact_name: str) -> bool:
+    """Return True only for filenames that clearly belong to the task output."""
+    if not task.filename or not artifact_name:
+        return False
+    return artifact_name == task.filename or artifact_name.startswith(f"{task.filename}.")
+
+
 class DownloadQueuePanel(QWidget):
     """下载队列面板"""
     
@@ -423,7 +430,7 @@ class DownloadQueuePanel(QWidget):
             if temp_dir.exists():
                 # 查找与任务相关的临时文件
                 for item in temp_dir.iterdir():
-                    if task.filename in item.name:
+                    if _task_owns_artifact(task, item.name):
                         try:
                             if item.is_dir():
                                 shutil.rmtree(item, ignore_errors=True)
@@ -443,9 +450,8 @@ class DownloadQueuePanel(QWidget):
                         continue
                         
                     name = item.name
-                    # 只有当文件名包含任务名时才处理 (避免误删)
-                    # 注意：task.filename 应该是已经去除非法字符的
-                    if task.filename not in name:
+                    # 仅删除明确属于当前任务的临时产物，避免误删同目录下的其他文件
+                    if not _task_owns_artifact(task, name):
                         continue
                         
                     is_temp = False
