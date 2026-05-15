@@ -1,223 +1,117 @@
-# m3u8 video sniffer v0.2.0
+# M3U8D v0.4.1
 
 <p align="leftr">
   <b>English</b> | <a href="README_ZH.md">简体中文</a>
 </p>
 
-> A Windows desktop tool for streaming-media sniffing, parsing, downloading, protocol handoff, and installer-based distribution. The current release already provides a full workflow from browser capture to queue-based downloading and packaged installation.
+> A Windows desktop tool for streaming-media sniffing, parsing, and downloading. Captures media resources from real browser sessions, dispatches them to multiple download engines, and manages the full lifecycle from discovery to completion.
 
 <p align="center">
   <img src="images/download%20center.jpg" width="800" alt="Main Interface">
 </p>
 
 <p align="center">
-  <img src="images/brower%20workbench.jpg" width="400" alt="Download Center" style="display: inline-block; margin-right: 10px;">
+  <img src="images/brower%20workbench.jpg" width="400" alt="Browser Workbench" style="display: inline-block; margin-right: 10px;">
   <img src="images/resource%20list.jpg" width="400" alt="Resource List" style="display: inline-block;">
 </p>
 
 ## Overview
 
-M3U8D is a Windows desktop application built with Python and PyQt6. Its goal is to unify the following tasks into one workflow:
+M3U8D is a Windows desktop application built with Python and PyQt6. It unifies the following tasks into one workflow:
 
-- open a real web page
-- preserve login state and cookies
-- capture media requests
-- choose a proper download engine
-- manage download tasks
-- distribute the app through a proper Windows installer
+- Open real web pages in a persistent browser session with login state and cookies
+- Automatically discover m3u8 / mpd / mp4 / webm / magnet and other media candidates during playback
+- Filter, select quality, and assign download engines from the resource list
+- Execute downloads with multiple engines and manage queue, retries, and history
+- Receive resources from external browser extensions or scripts via local HTTP API and `m3u8dl://` protocol
 
-Based on the current 0.2.0 codebase, the project already includes:
+## Key Features
 
-- a real Playwright-driven browser workflow instead of relying only on a simplified web view
-- capture support for `m3u8`, `mpd`, `mp4`, `webm`, and related media candidates
-- automatic / user-preferred engine selection for download dispatch
-- download queue management, runtime logs, history, retry handling, and basic metrics
-- local HTTP receiving plus `m3u8dl://` protocol integration for external browser / extension handoff
-- a complete [`PyInstaller`](build_pyinstaller.py) + [`Inno Setup`](installer/M3U8D.iss) packaging chain
+### Browser Workbench and Resource Sniffing
 
-The current desktop packaging entry uses [`mvs.pyw`](mvs.pyw:32), while [`main.py`](main.py:36) remains available as a source entry. The main application window is centered in [`ui/main_window.py`](ui/main_window.py:31).
+- Launches a real persistent Chrome via Playwright (not an embedded web control)
+- Preserves login state, cookies, and extensions across sessions
+- Four discovery paths: page-URL pattern matching, request interception, response Content-Type detection, and injected frontend script callbacks
+- Capture window mechanism for delayed / dynamically-injected media links
+- Reduces automation detection with `--disable-blink-features=AutomationControlled`
 
-## Version 0.2.0 Status
+### Resource List and Filtering
 
-The installer version is now defined as `0.2.0` in [`installer/M3U8D.iss`](installer/M3U8D.iss:2).
+- Multi-layer deduplication (URL, video ID, itag, title, variant)
+- Search by title / URL / source text
+- Filter by type (M3U8 / MPD / MP4 / FLV / MKV / WEBM / TS), source domain, and resolution
+- Automatic M3U8 master playlist parsing and variant expansion
+- Batch download, batch removal, and clear operations
 
-From the latest code, 0.2.0 specifically includes:
+### Multi-Engine Download
 
-- startup checks for missing required dependencies, with optional guided installation, see [`mvs.pyw`](mvs.pyw:60)
-- three main tabs in the main window: browser workspace, resource list, and download center, see [`ui/main_window.py`](ui/main_window.py:146)
-- integration of `yt-dlp`, `N_m3u8DL-RE`, `Streamlink`, `Aria2`, and `FFmpeg`, see [`ui/main_window.py`](ui/main_window.py:64)
-- a local CatCatch server that starts at port `9527` and falls back to `9528-9539` if needed, see [`core/catcatch_server.py`](core/catcatch_server.py:181)
-- a protocol handler that accepts JSON payloads, command-style payloads, and plain URL payloads, see [`protocol_handler.pyw`](protocol_handler.pyw:99)
-- installer-side options to download required dependencies, recommended dependencies, and register the `m3u8dl://` protocol after installation, see [`installer/M3U8D.iss`](installer/M3U8D.iss:68)
+Five download engines work together:
 
-## Core Features
+| Engine | Best For |
+|--------|----------|
+| N_m3u8DL-RE | m3u8 / mpd / HLS / DASH with quality selection |
+| yt-dlp | YouTube / Bilibili / TikTok / Instagram / Twitter / Vimeo and page-based sites |
+| Streamlink | Live streams (Twitch / Douyu / Huya / Bilibili Live) |
+| Aria2 | Direct-link files and magnet links |
+| FFmpeg | Post-processing (remux, merge, subtitle extraction) |
 
-### 1. Browser Workspace and Resource Sniffing
+Engine selection priority: user preference → extension-based detection → MIME probe → live-platform list → yt-dlp fallback. Rules are externalized in `resources/engine_rules.json`.
 
-The current browser workflow is mainly built around [`PlaywrightDriver`](core/playwright_driver.py) and [`BrowserView`](ui/browser_view.py:27).
+### Download Management
 
-It currently supports:
+- Idempotent enqueue: duplicate requests are merged, not stacked
+- Disk-space precheck before enqueue (1.2× estimated size)
+- Concurrent worker pool with dynamic adjustment (soft exit on shrink)
+- HLS preflight probe (key URL + first segment reachability)
+- Retry with backoff, engine fallback chain, and auth-retry-first strategy
+- Stop response within 2 seconds (500ms read-loop exit + 1.5s recursive kill)
+- Clear feedback: `queued` / `merged` / `needs_confirmation` / `failed`
 
-- launching a real browser session with persistent login state and cookies
-- navigating directly from the address bar, see [`ui/main_window.py`](ui/main_window.py:195)
-- caching a pending URL until the browser becomes ready, see [`ui/browser_view.py`](ui/browser_view.py:164)
-- forwarding captured resources into the sniffer and resource list, see [`ui/browser_view.py`](ui/browser_view.py:185)
-- adding `--disable-blink-features=AutomationControlled` at startup to reduce automation detection, see [`main.py`](main.py:28) and [`mvs.pyw`](mvs.pyw:37)
+### Component Manager
 
-One important limitation should be documented clearly: the New Tab action can trigger navigation, but [`BrowserView.back()`](ui/browser_view.py:249), [`BrowserView.forward()`](ui/browser_view.py:250), and [`BrowserView.reload()`](ui/browser_view.py:251) are still placeholders rather than fully implemented browser controls.
+- Manages all five engines: check local version, check remote updates, one-click update
+- Three-layer sha256 verification: static pin, dynamic sidecar (`sha256_url`), Trust-on-First-Use (TOFU via `~/.m3u8d/component_pins.json`)
+- Staging directory isolation → pre-install sha256 re-verify → atomic replace with `.bak` rollback
+- Post-install version cross-check with relaxed prefix matching
+- Per-2% progress updates for large downloads (FFmpeg ~130 MB)
+- No silent background installs; read-only check on startup, user-confirmed updates only
 
-### 2. Resource List and Filtering
+### External Integration
 
-The resource list is managed by [`ResourcePanel`](ui/resource_panel.py:14). In its current form, it supports:
+**CatCatch Local HTTP Service:**
+- Binds strictly to `127.0.0.1:9527` (fallback 9528–9539)
+- Session token authentication (`X-Session-Token` + Origin allowlist)
+- SSRF filtering: rejects private / loopback / link-local / cloud-metadata URLs
+- Request body limit: 64 KiB (413 on exceed)
+- `GET /download` disabled (405); all downloads via authenticated `POST /download`
+- Internal `_`-prefixed headers stripped from external payloads
 
-- automatic deduplication and candidate collection, see [`ui/resource_panel.py`](ui/resource_panel.py:249)
-- search, type filter, source filter, and quality filter, see [`ui/resource_panel.py`](ui/resource_panel.py:111)
-- batch download, batch removal, and clear-list operations, see [`ui/resource_panel.py`](ui/resource_panel.py:87)
-- a table showing filename, type, quality, source, suggested engine, detection time, and action button, see [`ui/resource_panel.py`](ui/resource_panel.py:141)
+**Protocol Handler (`m3u8dl://`):**
+- Reads `~/.m3u8d/session.token` and hands off to running instance via authenticated POST
+- Falls back to launching a new instance only when no running instance responds
+- Log redaction: tokens and sensitive query params never written in plaintext
 
-This makes the current version suitable for real-world cases where multiple candidate streams appear only after playback begins.
+### Security and Privacy
 
-### 3. Multi-Engine Download Workflow
-
-The main window loads external engines from configuration at startup, see [`ui/main_window.py`](ui/main_window.py:64).
-
-The current engine set includes:
-
-- `N_m3u8DL-RE`
-- `yt-dlp`
-- `Streamlink`
-- `Aria2`
-- `FFmpeg` for post-processing
-
-Dependency declarations are stored in [`deps.json`](deps.json:1):
-
-- required: `yt-dlp`, `N_m3u8DL-RE`, `FFmpeg`
-- recommended: `aria2c`, `Streamlink`
-- optional: `Deno`
-
-When a task enters the queue, the manager chooses an engine based on the URL and optional user preference, see [`DownloadManager.add_task()`](core/download_manager.py:48) and [`core/engine_selector.py`](core/engine_selector.py).
-
-### 4. Download Queue, Logs, and History
-
-The download center is mainly powered by [`DownloadQueuePanel`](ui/download_queue.py:20) and [`DownloadManager`](core/download_manager.py:24).
-
-Current capabilities include:
-
-- queue states such as waiting, downloading, paused, failed, and completed
-- task operations such as pause, resume, stop, delete, retry, and open folder, see [`ui/download_queue.py`](ui/download_queue.py:90)
-- concurrent worker-based task execution, see [`DownloadManager._start_workers()`](core/download_manager.py:171)
-- failure classification, rough failure-stage detection, retries, and status updates, see [`core/download_manager.py`](core/download_manager.py:201)
-- integrated runtime logs, download history, and queue views through the main UI, see [`ui/main_window.py`](ui/main_window.py:244)
-
-### 5. External Integration: CatCatch + Protocol Handler
-
-The project currently supports two external entry paths:
-
-1. local HTTP API delivery
-2. `m3u8dl://` protocol delivery
-
-Relevant components:
-
-- local HTTP server: [`CatCatchServer`](core/catcatch_server.py:162)
-- API endpoints such as `/download` and `/status`: [`core/catcatch_server.py`](core/catcatch_server.py:48)
-- protocol handler implementation: [`protocol_handler.pyw`](protocol_handler.pyw)
-- protocol registration script: [`scripts/register_protocol.bat`](scripts/register_protocol.bat)
-- protocol unregistration script: [`scripts/uninstall_protocol.bat`](scripts/uninstall_protocol.bat)
-
-This allows browser extensions, external scripts, or other tools to push already-discovered links into M3U8D.
-
-### 6. Installer-Based Distribution
-
-Version 0.2.0 keeps the existing packaging approach:
-
-- PyInstaller build entry: [`build_pyinstaller.py`](build_pyinstaller.py)
-- batch wrapper: [`build_pyinstaller.bat`](build_pyinstaller.bat)
-- installer script: [`installer/M3U8D.iss`](installer/M3U8D.iss)
-- final installer output: [`installer/output/M3U8D-Setup.exe`](installer/output/M3U8D-Setup.exe)
-
-This is not a tiny bare executable. It is a proper installer package with an installation UI and post-install actions.
-
-The current installer can:
-
-- install the main one-dir application bundle
-- install the separate protocol-handler one-dir bundle
-- optionally download required and recommended dependencies after installation
-- optionally register the `m3u8dl://` protocol after installation
-
-## Typical Workflows
-
-### Workflow A: Open a page inside the app and capture resources
-
-1. Start the application.
-2. Open the browser workspace.
-3. Start the browser.
-4. Enter the target page URL.
-5. Play the video, switch quality, or log in.
-6. Filter captured candidates in the resource list.
-7. Select a resource and send it to the download queue.
-8. Monitor progress and logs in the download center.
-
-Best suited for:
-
-- cases where the real media URL appears only after page execution
-- sites that require cookies or login state
-- cases where you must choose among multiple stream variants manually
-
-### Workflow B: Push links from CatCatch or external scripts
-
-1. An external tool sends `url`, `headers`, and `filename` to the local HTTP service.
-2. Or it launches M3U8D through the `m3u8dl://` protocol.
-3. The app inserts the resource into the resource list.
-4. The user confirms and downloads it.
-
-Related handling can be found in [`mvs.pyw`](mvs.pyw:97), [`main.py`](main.py:63), and [`protocol_handler.pyw`](protocol_handler.pyw:175).
-
-### Workflow C: Paste a known media URL directly
-
-If you already have a direct `m3u8`, `mpd`, or `mp4` URL, you can send it into the app and let the engine-selection logic handle the rest.
+- All engine command lines use parameterized arrays (no string concatenation)
+- Headers forwarded to engines are allowlisted: Referer / User-Agent / Origin / Cookie / Accept-Language only
+- yt-dlp `format_id` validated against `[A-Za-z0-9_.+:\-]+` (shell metacharacters rejected)
+- Download history (`history.json`) strips Cookie / Authorization / X-Session-Token before writing
+- Log redaction: 28 sensitive query-key patterns (OAuth / AWS / GCS / CloudFront / Azure tokens)
+- Debug-sensitive log (`SECURITY_DEBUG=1`) isolated and disabled by default
 
 ## Runtime Environment
 
-Recommended environment:
-
 | Item | Requirement |
-| --- | --- |
+|------|-------------|
 | OS | Windows 10/11 64-bit |
 | Python | 3.9+ |
-| GUI stack | `PyQt6` + `PyQt6-WebEngine` |
-| Browser | Google Chrome installed on the system is recommended |
-| Network | Access to GitHub and common media sites is recommended |
-| Disk space | At least 500MB, 2GB+ recommended |
+| GUI | PyQt6 + PyQt6-WebEngine |
+| Browser | Google Chrome installed on the system |
+| Network | Access to GitHub and common media sites |
+| Disk | At least 500 MB, 2 GB+ recommended |
 
-Important notes:
-
-- the built-in browser workflow strongly depends on a system-installed Chrome; see [`resources/manual_zh.md`](resources/manual_zh.md) and [`resources/manual_en.md`](resources/manual_en.md)
-- installing `playwright install chromium` alone is not equivalent to having the full Chrome-based workflow available
-- if key external engines are missing, the app may still start, but download capability will be reduced significantly
-
-## Dependencies
-
-### Python Dependencies
-
-Core Python packages are listed in [`requirements.txt`](requirements.txt):
-
-- `PyQt6>=6.6.0`
-- `PyQt6-WebEngine>=6.6.0`
-- `plyer>=2.1.0`
-- `requests>=2.31.0`
-- `playwright>=1.40.0`
-
-### External Binary Dependencies
-
-The dependency manifest is defined in [`deps.json`](deps.json:1), and the download flow is implemented by [`scripts/download_dependencies.py`](scripts/download_dependencies.py) and [`scripts/download_tools.bat`](scripts/download_tools.bat:1).
-
-Default categories:
-
-- required: `yt-dlp`, `N_m3u8DL-RE`, `FFmpeg`
-- recommended: `aria2c`, `Streamlink`
-- optional: `Deno`
-
-In the installer flow, post-install dependency download is triggered through [`download_tools.bat`](scripts/download_tools.bat:1), as configured in [`installer/M3U8D.iss`](installer/M3U8D.iss:68).
+**Important:** The built-in browser depends on system-installed Chrome. `playwright install chromium` alone is not a substitute.
 
 ## Quick Start
 
@@ -229,149 +123,129 @@ pip install -r requirements.txt
 
 ### 2. Prepare browser and external tools
 
-- make sure Google Chrome is installed on the system
-- make sure required files exist under [`bin/`](bin), or run [`scripts/download_tools.bat`](scripts/download_tools.bat)
+- Ensure Google Chrome is installed and can launch normally
+- Ensure required engines exist under `bin/`, or run `scripts/download_tools.bat`
 
 ### 3. Start the application
-
-The recommended source entry aligned with the current packaging flow is:
 
 ```bash
 python mvs.pyw
 ```
 
-You can also use the lighter source entry:
+Or the lighter development entry:
 
 ```bash
 python main.py
 ```
 
-Notes:
+### 4. (Optional) Register the protocol handler
 
-- [`mvs.pyw`](mvs.pyw:32) includes runtime-directory initialization plus required-dependency checking
-- [`main.py`](main.py:36) remains useful as a direct source entry for development or debugging
+```bash
+scripts\register_protocol.bat
+```
+
+This enables `m3u8dl://` links from browser extensions (e.g., CatCatch) to be received by M3U8D.
 
 ## Command-Line Parameters
 
-Current entry points support:
+| Parameter | Description |
+|-----------|-------------|
+| `--url` | Video or page URL (http/https only, max 4096 chars, SSRF-filtered) |
+| `--headers` | JSON string with request headers (allowlisted fields only) |
+| `--filename` | Default filename (Windows-safe sanitized, max 240 bytes path) |
 
-- `--url`
-- `--headers`
-- `--filename`
+## Dependencies
 
-Argument parsing is implemented in [`mvs.pyw`](mvs.pyw:23) and [`main.py`](main.py:19).
+### Python
 
-Typical use cases:
+Listed in `requirements.txt`:
+- PyQt6 ≥ 6.6.0
+- PyQt6-WebEngine ≥ 6.6.0
+- plyer ≥ 2.1.0
+- requests ≥ 2.31.0
+- playwright ≥ 1.40.0
 
-- link handoff from the protocol handler
-- resource injection from external scripts
-- debugging by directly pushing a target resource into the GUI
+### External Engines
+
+Declared in `deps.json`:
+- **Required:** yt-dlp, N_m3u8DL-RE, FFmpeg
+- **Recommended:** aria2c, Streamlink
+- **Optional:** Deno
 
 ## Packaging and Installation
 
-### Source Execution
+| Step | Tool | Entry |
+|------|------|-------|
+| Build | PyInstaller | `build_pyinstaller.py` / `build_pyinstaller.bat` |
+| Installer | Inno Setup | `installer/M3U8D.iss` |
+| Output | | `installer/output/M3U8D-Setup v0.4.1.exe` |
 
-- primary entry: [`mvs.pyw`](mvs.pyw)
-- alternate entry: [`main.py`](main.py)
-
-### PyInstaller Packaging
-
-- build script: [`build_pyinstaller.py`](build_pyinstaller.py)
-- batch wrapper: [`build_pyinstaller.bat`](build_pyinstaller.bat)
-- spec output directory: [`build/pyinstaller/spec/`](build/pyinstaller/spec)
-
-### Inno Setup Installer
-
-- installer script: [`installer/M3U8D.iss`](installer/M3U8D.iss)
-- installer output directory: [`installer/output/`](installer/output)
-- current installer: [`installer/output/M3U8D-Setup.exe`](installer/output/M3U8D-Setup.exe)
+The installer can:
+- Install the main application bundle and protocol handler
+- Optionally download required / recommended engines post-install
+- Optionally register the `m3u8dl://` protocol
 
 ## Project Structure
 
 ```text
 M3U8D/
-├── mvs.pyw                    # current packaging entry / recommended source entry
-├── main.py                    # alternate source entry
+├── mvs.pyw                    # recommended entry (packaging-aligned)
+├── main.py                    # development entry
 ├── protocol_handler.pyw       # m3u8dl:// protocol handler
 ├── config.json                # application configuration
 ├── deps.json                  # external dependency manifest
-├── core/                      # sniffing, dependency checks, download management, task model
+├── core/                      # sniffing, download management, component updates
+│   └── download/              # modular download manager (queue, workers, classifier)
 ├── engines/                   # download-engine adapters
 ├── ui/                        # PyQt6 GUI layer
-├── utils/                     # logging, i18n, config, notifications
-├── resources/                 # icons, built-in manuals, UI assets
-├── scripts/                   # protocol registration, dependency download, test scripts
+├── utils/                     # logging, i18n, config, redaction, path sanitization
+├── resources/                 # icons, manuals, engine_rules.json
+├── scripts/                   # protocol registration, dependency download
 ├── tests/                     # automated tests
-├── installer/                 # Inno Setup installer and output directory
-├── build/                     # PyInstaller intermediate artifacts
-├── logs/                      # runtime logs
-├── cookies/                   # cookie storage
-└── plans/                     # plans, reports, and design notes
+├── installer/                 # Inno Setup installer
+├── bin/                       # external engine binaries
+├── logs/                      # runtime logs (auto-rotated)
+└── cookies/                   # cookie storage per domain
 ```
-
-Good starting points for reading the code:
-
-- main window: [`MainWindow`](ui/main_window.py:31)
-- browser control: [`BrowserView`](ui/browser_view.py:27)
-- download management: [`DownloadManager`](core/download_manager.py:24)
-- protocol integration: [`protocol_handler.pyw`](protocol_handler.pyw)
-- local HTTP integration: [`CatCatchServer`](core/catcatch_server.py:162)
 
 ## FAQ
 
-### 1. The app starts, but the browser workflow is unstable
+### The browser starts but some videos won't play
 
-Check the following first:
+The Playwright-driven Chrome runs with different flags than your daily browser. Common causes:
+- Widevine DRM CDM not loaded (check `chrome://components` in the built-in browser)
+- GPU/hardware decode restricted in automation mode
+- Some anti-bot systems detect the automation environment
 
-- whether Chrome is installed and can launch normally
-- whether the target site exposes the real media URL only after login or playback
-- whether playback or quality switching actually triggered network requests
-- whether required external engines are installed correctly
+**Workaround:** Use your system browser + CatCatch extension to capture the resource URL, then let M3U8D download it via the protocol handler or HTTP API.
 
-### 2. Why does the installer still ask to download dependencies?
+### Protocol handler launches a new instance instead of reusing the running one
 
-Because the installer currently ships the application bundle and runtime structure, while external download engines are completed through the post-install dependency-download step. See [`installer/M3U8D.iss`](installer/M3U8D.iss:68) and [`scripts/download_tools.bat`](scripts/download_tools.bat:10).
+- Ensure `scripts\register_protocol.bat` was executed after the latest install
+- Check that `~/.m3u8d/session.token` exists and is readable
+- Verify ports 9527–9539 are not blocked by firewall
 
-### 3. Why is [`mvs.pyw`](mvs.pyw) recommended over only using [`main.py`](main.py)?
+### Component update seems stuck
 
-Because the latest packaging path and protocol handoff flow are closer to [`mvs.pyw`](mvs.pyw:32), and it also performs runtime-directory initialization plus required-dependency checks.
-
-### 4. What should I check if protocol integration fails?
-
-Check:
-
-- whether [`scripts/register_protocol.bat`](scripts/register_protocol.bat) was executed
-- whether the packaged `protocol_handler` bundle was deployed correctly
-- whether the local CatCatch service is running
-- whether ports `9527-9539` are blocked by firewall or occupied by other processes
-
-### 5. Does the project now support full installer-based distribution?
-
-Yes. The repository already contains the full [`PyInstaller`](build_pyinstaller.py) + [`Inno Setup`](installer/M3U8D.iss) chain and the installer output [`installer/output/M3U8D-Setup.exe`](installer/output/M3U8D-Setup.exe).
+Large components (FFmpeg ~130 MB) take several minutes. The UI shows per-2% progress updates. The total timeout is 10 minutes per HTTPS request. If truly stuck (zero speed for extended time), click Retry in Component Manager.
 
 ## Compliance and Open-Source Notice
 
-Please read [`OPEN_SOURCE_NOTICE.md`](OPEN_SOURCE_NOTICE.md).
+See [`OPEN_SOURCE_NOTICE.md`](OPEN_SOURCE_NOTICE.md).
 
-In particular:
-
-- this project is intended for technical research, learning, development validation, and lawful personal use
-- open-sourcing the project does not imply any authorization over target-site content
-- users are responsible for checking site terms, copyright limits, and local laws
-- third-party download engines have their own licenses and redistribution rules
-- the project must not be used for infringement, abusive bulk access, bypassing restrictions, or any illegal activity
+- This project is for technical research, learning, and lawful personal use
+- Open-sourcing does not grant any rights over target-site content
+- Users must verify site terms, copyright, and local laws
+- Third-party engines have their own licenses
+- Must not be used for infringement, bulk abuse, or illegal activity
 
 ## Related Documents
 
-- [`INSTALL.md`](INSTALL.md): installation, environment preparation, troubleshooting
-- [`MANUAL.md`](MANUAL.md): Chinese user manual
-- [`resources/manual_zh.md`](resources/manual_zh.md): detailed Chinese built-in manual source
-- [`resources/manual_en.md`](resources/manual_en.md): detailed English built-in manual source
-- [`UNINSTALL.md`](UNINSTALL.md): uninstall guide
-- [`OPEN_SOURCE_NOTICE.md`](OPEN_SOURCE_NOTICE.md): compliance boundary and open-source notice
-
----
+- [INSTALL.md](INSTALL.md) — installation and environment setup
+- [CHANGELOG_v0.4.1.md](CHANGELOG_v0.4.1.md) — detailed changelog from v0.3.1
+- [resources/manual_zh.md](resources/manual_zh.md) — detailed Chinese user manual
+- [resources/manual_en.md](resources/manual_en.md) — detailed English user manual
 
 ## License
 
-The repository currently includes [`LICENSE`](LICENSE) and [`OPEN_SOURCE_NOTICE.md`](OPEN_SOURCE_NOTICE.md). Before redistributing binaries, installers, or releases, also verify the licenses and redistribution requirements of all bundled third-party tools.
+See [LICENSE](LICENSE). Before redistributing binaries or installers, verify the licenses of all bundled third-party tools.
