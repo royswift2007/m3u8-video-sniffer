@@ -4,12 +4,15 @@ Runtime path helpers for source and PyInstaller execution.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
 
 
 APP_DIR_NAME = "M3U8D"
+
+_logger = logging.getLogger(__name__)
 
 
 def is_frozen() -> bool:
@@ -99,9 +102,68 @@ def get_temp_dir() -> Path:
     return get_data_root() / "Temp"
 
 
+def get_component_update_state_path() -> Path:
+    """Return the writable component update state file path."""
+    return get_data_root() / "component_updates.json"
+
+
+def get_component_update_temp_dir() -> Path:
+    """Return the writable temp directory for component update assets."""
+    return get_temp_dir() / "component_updates"
+
+
+def get_component_backup_dir() -> Path:
+    """Return the writable backup directory for component updates."""
+    return get_data_root() / "component_backups"
+
+
+def get_engine_paths_trusted_path() -> Path:
+    """Return the writable trust registry path for user-authorized engine exe.
+
+    Consumed by :mod:`utils.engine_paths`. The file records
+    ``[{path, sha256, added_at}]`` entries that were explicitly approved by
+    the user through the "Settings → Custom engine path" flow. On each
+    startup the sha256 is recomputed and mismatching entries are dropped.
+    """
+    return get_data_root() / "engine_paths_trusted.json"
+
+
+def get_safe_engine_roots() -> tuple[Path, ...]:
+    """Return the safe roots that an engine exe must fall under.
+
+    Per Requirement 7 of ``security-stability-hardening`` the allowed
+    roots are:
+
+    * the current package ``bin/`` directory (always), and
+    * ``sys._MEIPASS/bin`` when running from a PyInstaller bundle.
+
+    Paths are returned unresolved; callers that care about symlink escape
+    should resolve both sides before comparing.
+    """
+    roots: list[Path] = [get_bin_dir()]
+    if is_frozen():
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            roots.append(Path(meipass) / "bin")
+    return tuple(roots)
+
+
+#: Snapshot of :func:`get_safe_engine_roots` taken at import time. Prefer
+#: the function form from inside long-running processes if the runtime
+#: bundle root can change (tests); keep this alias for readability at
+#: call sites that do not need refreshable behavior.
+SAFE_ENGINE_ROOTS: tuple[Path, ...] = get_safe_engine_roots()
+
+
 def get_runtime_directories() -> tuple[Path, ...]:
     """Return runtime directories that should always exist."""
-    return get_data_root(), get_logs_dir(), get_temp_dir()
+    return (
+        get_data_root(),
+        get_logs_dir(),
+        get_temp_dir(),
+        get_component_update_temp_dir(),
+        get_component_backup_dir(),
+    )
 
 
 def initialize_runtime_directories() -> tuple[Path, ...]:
@@ -110,4 +172,17 @@ def initialize_runtime_directories() -> tuple[Path, ...]:
     for directory in get_runtime_directories():
         directory.mkdir(parents=True, exist_ok=True)
         created_directories.append(directory)
+    # R17.4: clean up any leftover ``*.bak`` siblings in ``bin/`` from a
+    # previous component install. See
+    # ``ComponentUpdateInstaller.cleanup_stale_backup_files``.
+    try:
+        from core.component_update_installer import ComponentUpdateInstaller
+        ComponentUpdateInstaller.cleanup_stale_backup_files_static(get_bin_dir())
+    except (OSError, ImportError) as exc:
+        # Startup must never fail because of opportunistic .bak cleanup.
+        # Redact the exception message — it may contain resolved bin/ paths
+        # that, while not secret, aren't useful to users.
+        _logger.debug(
+            "app_paths: stale .bak cleanup skipped (%s)", type(exc).__name__
+        )
     return tuple(created_directories)

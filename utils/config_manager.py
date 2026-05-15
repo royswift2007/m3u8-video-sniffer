@@ -7,12 +7,27 @@ from __future__ import annotations
 import copy
 import json
 import os
+import threading
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from core.app_paths import get_app_root, get_bin_path, get_temp_dir, is_frozen, resolve_app_path
+from utils.engine_paths import (
+    find_engine_on_path,
+    reconcile_trusted_registry,
+    validate_engine_exe,
+)
+from utils.errors import StructuredError
 from utils.json_store import backup_path_for, corrupt_path_for, write_json_atomic
 from utils.logger import logger
+
+
+#: Current configuration schema version. Bump when introducing a new
+#: ``_migrate_vN_to_v{N+1}`` step. Readers that don't know about this key
+#: still see the rest of the config unchanged because the field is opaque
+#: to them; writers always stamp this version so repeated loads are
+#: idempotent.
+CONFIG_SCHEMA_VERSION = 1
 
 
 class ConfigManager:
@@ -30,10 +45,30 @@ class ConfigManager:
         self.base_dir = get_app_root()
         self.config_path = str(resolve_app_path(config_path))
         self.config: Dict[str, Any] = {}
+        # Per-process reentrant lock; ``set`` may call ``save`` which also
+        # acquires the lock, so it must be reentrant (RLock, not Lock).
+        self._lock = threading.RLock()
+        # Last persistence failure; exposed for callers that want to surface
+        # structured errors without changing the legacy ``save()`` signature.
+        self._last_save_error: Optional[StructuredError] = None
+        # Reconcile the user-approved engine paths registry once per
+        # process start. Entries whose on-disk sha256 no longer matches
+        # are evicted so that a later ``validate_engine_exe`` falls back
+        # to the default bundled binary. Best-effort — failures are
+        # logged by :func:`reconcile_trusted_registry` itself.
+        try:
+            reconcile_trusted_registry()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"reconcile_trusted_registry 失败（已忽略）: {exc}")
         self.load()
 
     def load(self):
         """Load config from disk and merge with defaults."""
+        with self._lock:
+            self._load_locked()
+
+    def _load_locked(self):
+        """Load config from disk; caller must hold ``self._lock``."""
         default_config = self._build_default_config()
         config_file = Path(self.config_path)
         backup_file = backup_path_for(config_file)
@@ -54,13 +89,23 @@ class ConfigManager:
                 loaded_config.pop("_说明", None)
             else:
                 raise ValueError("配置文件顶层必须是对象")
+            loaded_config, migrated = self._apply_migrations(loaded_config)
             merged_config, changed = self._merge_with_defaults(default_config, loaded_config)
             self.config = merged_config
             runtime_changed = self._sanitize_runtime_paths()
-            changed = changed or runtime_changed or recovered_from_backup or not backup_file.exists()
+            changed = (
+                changed
+                or runtime_changed
+                or recovered_from_backup
+                or migrated
+                or not backup_file.exists()
+            )
             self._ensure_directories()
             if changed:
-                logger.info("检测到缺省配置项或运行时路径异常，已自动修正并保存")
+                if migrated:
+                    logger.info("检测到旧版本配置，已完成迁移并保存")
+                else:
+                    logger.info("检测到缺省配置项或运行时路径异常，已自动修正并保存")
                 self.save()
             else:
                 logger.info("配置已加载")
@@ -73,15 +118,117 @@ class ConfigManager:
                 logger.info("回退默认配置后已完成运行时路径修正")
             self.save()
 
-    def save(self):
-        """Save runtime config to disk with a lightweight help section."""
-        try:
-            config_with_comments = copy.deepcopy(self.config)
-            config_with_comments["_说明"] = self._build_comment_map()
-            write_json_atomic(self.config_path, config_with_comments, indent=4, ensure_ascii=False)
+    def save(self) -> Optional[StructuredError]:
+        """Save runtime config to disk atomically under a per-process lock.
+
+        Returns
+        -------
+        Optional[StructuredError]
+            ``None`` on success. On failure, returns a ``StructuredError``
+            with ``code="config_write_failed"``; the in-memory config and
+            the previous on-disk ``config.json`` are left untouched. The
+            same error is also cached in ``self._last_save_error`` for
+            legacy call sites that ignore the return value.
+        """
+        with self._lock:
+            try:
+                config_with_comments = copy.deepcopy(self.config)
+                config_with_comments["_说明"] = self._build_comment_map()
+            except Exception as exc:
+                # Snapshotting the in-memory config must never throw in
+                # practice; if it does we still want a structured error
+                # rather than a raw exception propagating to the UI thread.
+                err = StructuredError(
+                    code="config_write_failed",
+                    reason=repr(exc),
+                    stage="fs",
+                    details={"path": self.config_path, "phase": "snapshot"},
+                )
+                self._last_save_error = err
+                logger.error(f"保存配置失败(快照阶段): {exc}")
+                return err
+
+            target_path = Path(self.config_path)
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                err = StructuredError(
+                    code="config_write_failed",
+                    reason=repr(exc),
+                    stage="fs",
+                    details={"path": self.config_path, "phase": "mkdir"},
+                )
+                self._last_save_error = err
+                logger.error(f"保存配置失败(创建目录): {exc}")
+                return err
+
+            tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
+            try:
+                # Write to sibling .tmp, flush + fsync, then atomic replace.
+                with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
+                    json.dump(
+                        config_with_comments,
+                        handle,
+                        indent=4,
+                        ensure_ascii=False,
+                    )
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, target_path)
+            except OSError as exc:
+                # Write failed: drop the partial tmp, keep the in-memory
+                # values and the existing on-disk config intact, and
+                # return a structured error.
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError as cleanup_exc:
+                    logger.warning(
+                        f"清理临时配置文件失败: {cleanup_exc} ({tmp_path})"
+                    )
+                err = StructuredError(
+                    code="config_write_failed",
+                    reason=repr(exc),
+                    stage="fs",
+                    details={"path": self.config_path, "phase": "write"},
+                )
+                self._last_save_error = err
+                logger.error(f"保存配置失败: {exc}")
+                return err
+            except Exception as exc:  # pragma: no cover - defensive
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
+                err = StructuredError(
+                    code="config_write_failed",
+                    reason=repr(exc),
+                    stage="fs",
+                    details={"path": self.config_path, "phase": "serialize"},
+                )
+                self._last_save_error = err
+                logger.error(f"保存配置失败(序列化): {exc}")
+                return err
+
+            # Refresh sibling .bak so recovery still has a good copy.
+            try:
+                write_json_atomic(
+                    backup_path_for(target_path),
+                    config_with_comments,
+                    indent=4,
+                    ensure_ascii=False,
+                    write_backup=False,
+                )
+            except OSError as exc:
+                # Backup refresh is best-effort; a failed .bak must not
+                # turn a successful save into a reported failure.
+                logger.warning(f"刷新配置备份失败(已忽略): {exc}")
+
+            self._last_save_error = None
             logger.debug(f"配置已保存: {self.config_path}")
-        except Exception as e:
-            logger.error(f"保存配置失败: {e}")
+            return None
 
     def _load_saved_config(self) -> Tuple[Dict[str, Any], bool]:
         """Load config JSON from the primary file or its backup."""
@@ -126,43 +273,52 @@ class ConfigManager:
 
     def get(self, key: str, default: Any = None) -> Any:
         """Read config by dotted key."""
-        keys = key.split(".")
-        value: Any = self.config
-        for k in keys:
-            if isinstance(value, dict):
-                value = value.get(k)
-                if value is None:
+        with self._lock:
+            keys = key.split(".")
+            value: Any = self.config
+            for k in keys:
+                if isinstance(value, dict):
+                    value = value.get(k)
+                    if value is None:
+                        return default
+                else:
                     return default
-            else:
+            if value == "" or value is None:
                 return default
-        if value == "" or value is None:
-            return default
-        return value
+            return value
 
     def set(self, key: str, value: Any):
         """Set config by dotted key and persist to disk."""
-        keys = key.split(".")
-        config = self.config
-        for k in keys[:-1]:
-            if k not in config or not isinstance(config[k], dict):
-                config[k] = {}
-            config = config[k]
-        config[keys[-1]] = value
-        self._ensure_directories()
-        self.save()
+        with self._lock:
+            keys = key.split(".")
+            config = self.config
+            for k in keys[:-1]:
+                if k not in config or not isinstance(config[k], dict):
+                    config[k] = {}
+                config = config[k]
+            config[keys[-1]] = value
+            self._ensure_directories()
+            self.save()
 
     def _load_defaults(self):
         """
         Backward-compatible helper.
         Keep this method for old call sites; it now means reset-to-default and save.
         """
-        self.config = self._build_default_config()
-        self._ensure_directories()
-        self.save()
+        with self._lock:
+            self.config = self._build_default_config()
+            self._ensure_directories()
+            self.save()
+
+    def get_last_save_error(self) -> Optional[StructuredError]:
+        """Return the last persistence error, or ``None`` if the last save succeeded."""
+        with self._lock:
+            return self._last_save_error
 
     def _build_default_config(self) -> Dict[str, Any]:
         """Build default runtime config."""
         return {
+            "version": CONFIG_SCHEMA_VERSION,
             "download_dir": str(Path.home() / "Downloads"),
             "temp_dir": str(get_temp_dir()),
             "max_concurrent_downloads": 2,
@@ -187,6 +343,7 @@ class ConfigManager:
                 "network_verify_tls": True,
                 "hls_probe_enabled": True,
                 "hls_probe_hard_fail": True,
+                "allow_segment_probe_soft_fail": True,
                 "browser_capture_window_enabled": True,
                 "browser_capture_window_seconds": 12,
                 "browser_capture_extend_on_hit_seconds": 4,
@@ -230,6 +387,79 @@ class ConfigManager:
             },
         }
 
+    # ------------------------------------------------------------------
+    # Migration chain
+    # ------------------------------------------------------------------
+    def _apply_migrations(self, loaded: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        """Run the ``_migrate_vN_to_v{N+1}`` chain until ``loaded`` matches
+        ``CONFIG_SCHEMA_VERSION``.
+
+        The read path calls this before merging with defaults. Each step
+        receives and returns the loaded dict, so future migrations can add
+        keys, rename fields, or drop legacy entries. Missing/invalid
+        ``version`` is treated as ``0``. The routine is idempotent: once
+        the stamped version already matches, no step runs.
+
+        Returns
+        -------
+        (migrated_config, migrated)
+            ``migrated`` is ``True`` when at least one step fired so the
+            caller can trigger an atomic write-back.
+        """
+        raw_version = loaded.get("version")
+        try:
+            current_version = int(raw_version)
+        except (TypeError, ValueError):
+            current_version = 0
+
+        if current_version >= CONFIG_SCHEMA_VERSION:
+            # Already at target version (or newer from a future client).
+            # Ensure the stamp is an int for forward-compat readers and
+            # skip the chain entirely so repeated loads don't churn.
+            if raw_version != current_version:
+                loaded["version"] = current_version
+                return loaded, True
+            return loaded, False
+
+        migrations = {
+            0: self._migrate_v0_to_v1,
+            # Future: 1: self._migrate_v1_to_v2, ...
+        }
+
+        migrated = False
+        while current_version < CONFIG_SCHEMA_VERSION:
+            step = migrations.get(current_version)
+            if step is None:
+                logger.warning(
+                    f"未找到 config 迁移步骤 v{current_version} -> v{current_version + 1}，停止迁移"
+                )
+                break
+            try:
+                loaded = step(loaded)
+            except Exception as exc:
+                logger.error(
+                    f"config 迁移 v{current_version} -> v{current_version + 1} 失败: {exc}"
+                )
+                break
+            current_version += 1
+            loaded["version"] = current_version
+            migrated = True
+            logger.info(f"已将 config 迁移至 v{current_version}")
+
+        return loaded, migrated
+
+    def _migrate_v0_to_v1(self, loaded: Dict[str, Any]) -> Dict[str, Any]:
+        """Stamp legacy (unversioned) configs as v1.
+
+        v0 is the implicit schema used by every config.json shipped before
+        versioning was introduced. Beyond caller-supplied version stamping,
+        this step is a no-op: the existing merge with defaults already
+        reconciles missing keys. Future migrations should mutate and
+        return ``loaded`` in place with whatever field renames / key
+        moves are needed.
+        """
+        return loaded
+
     def _merge_with_defaults(
         self,
         defaults: Dict[str, Any],
@@ -261,7 +491,19 @@ class ConfigManager:
         return merged, changed
 
     def _sanitize_runtime_paths(self) -> bool:
-        """Repair polluted runtime paths for installed builds with bundled defaults."""
+        """Repair polluted runtime paths and enforce engine exe safety.
+
+        Integrates Requirement 7 (engine exe path hardening):
+
+        * Each ``engines.<name>.path`` value is run through
+          :func:`utils.engine_paths.validate_engine_exe`.
+        * Paths that fail validation are cleared and replaced with the
+          default ``bin/<engine>.exe`` path; an ``engine_path_tampered``
+          warning is emitted so operators can investigate.
+        * When the default bundled binary is missing we fall back to
+          :func:`utils.engine_paths.find_engine_on_path`, which only
+          accepts ``.exe`` hits on ``PATH``.
+        """
         changed = False
 
         temp_dir = self.config.get("temp_dir")
@@ -284,14 +526,75 @@ class ConfigManager:
 
             current_path = engine_config.get("path")
             expected_path = str(get_bin_path(executable_name))
+
+            # Fast path: when the default bundled binary is present and
+            # the current value looks sane, keep the legacy repair logic.
             if self._should_repair_engine_path(current_path, expected_path):
                 engine_config["path"] = expected_path
                 changed = True
                 logger.warning(
                     f"检测到 {engine_key} 引擎路径失效或已污染，已修正为: {expected_path}"
                 )
+                current_path = expected_path
+
+            # Security-hardened validation (R7). Only applied to real
+            # string values; the repair above already normalized empty /
+            # missing fields. A failure here means the path is outside
+            # the allowed roots *and* not trusted — reset it.
+            if isinstance(current_path, str) and current_path:
+                validated = validate_engine_exe(current_path)
+                if validated is None:
+                    # Structured "engine_path_tampered" warning. We avoid
+                    # echoing the full offending string at INFO; a debug
+                    # level log keeps the detail available when opted in.
+                    logger.warning(
+                        "engine_path_tampered: "
+                        f"engine={engine_key} reason=validation_failed"
+                    )
+                    logger.debug(
+                        f"engine_path_tampered 详情: engine={engine_key} "
+                        f"offending={current_path!r}"
+                    )
+                    fallback = self._resolve_engine_fallback(executable_name)
+                    if fallback is None:
+                        # No safe default available. Clear the field so
+                        # downstream loaders treat the engine as missing
+                        # rather than attempting to launch a bad binary.
+                        if "path" in engine_config:
+                            engine_config["path"] = ""
+                            changed = True
+                    else:
+                        if engine_config.get("path") != fallback:
+                            engine_config["path"] = fallback
+                            changed = True
 
         return changed
+
+    def _resolve_engine_fallback(self, executable_name: str) -> str | None:
+        """Return the safe default path for an engine, or ``None`` if absent.
+
+        Preference order matches Requirement 7.5:
+
+        1. The bundled ``bin/<executable>`` binary, when present.
+        2. ``shutil.which(executable_name)`` via
+           :func:`utils.engine_paths.find_engine_on_path` — but only if
+           the match is an ``.exe`` outside UNC/symlink-escape territory.
+        3. ``None`` — caller clears the field so the engine is reported
+           as unavailable rather than launched from an unsafe location.
+        """
+        default_path = get_bin_path(executable_name)
+        if default_path.exists():
+            validated = validate_engine_exe(default_path)
+            if validated is not None:
+                return str(validated)
+
+        path_hit = find_engine_on_path(executable_name)
+        if path_hit is not None:
+            validated = validate_engine_exe(path_hit)
+            if validated is not None:
+                return str(validated)
+
+        return None
 
     def _should_repair_engine_path(self, current_path: Any, expected_path: str) -> bool:
         """Return True if engine path should be reset to current runtime bin path."""
@@ -342,6 +645,7 @@ class ConfigManager:
     def _build_comment_map(self) -> Dict[str, str]:
         """Build writable help text shown in config.json."""
         return {
+            "version": "配置文件 schema 版本，勿手动修改，升级时自动迁移",
             "max_concurrent_downloads": "同时下载任务数，建议 2-3",
             "speed_limit": "下载限速(MB/s)，0 表示不限速",
             "max_retry_attempts": "任务最大重试次数（含引擎切换）",

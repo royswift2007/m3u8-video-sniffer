@@ -14,6 +14,53 @@ from utils.logger import logger
 from utils.i18n import i18n, TR
 
 
+# Audit-finding High #3: header keys that MUST NOT persist into
+# ``~/.m3u8sniffer/history.json``. Comparison is case-insensitive.
+# Re-download still works because:
+#   * Referer / User-Agent / Origin stay in history (needed for
+#     site_rules matching on replay).
+#   * Cookie / Authorization / X-Session-Token are always stripped and
+#     must be supplied fresh (manually re-exported or re-authenticated)
+#     when the user retries an old task. That is a deliberate tradeoff:
+#     a Cookie that unlocks a membership site has a much shorter
+#     lifetime than a history JSON file typically does.
+_HISTORY_STRIP_HEADER_KEYS: frozenset = frozenset(
+    {
+        "cookie",
+        "set-cookie",
+        "authorization",
+        "proxy-authorization",
+        "x-session-token",
+    }
+)
+
+
+def _redact_headers_for_history(headers: dict | None) -> dict:
+    """Drop sensitive headers before persisting to ``history.json``.
+
+    Preserves internal ``_``-prefixed markers *except* ``_cookie_file``
+    (the on-disk cookie-file path is already stored separately as the
+    ``cookie_file`` field). This way the retry path keeps everything it
+    needs without leaving raw secrets in a JSON file on disk.
+    """
+
+    if not isinstance(headers, dict):
+        return {}
+    redacted: dict = {}
+    for name, value in headers.items():
+        if not isinstance(name, str):
+            continue
+        if name.lower() in _HISTORY_STRIP_HEADER_KEYS:
+            continue
+        # Drop the internal cookie-file marker — the surrounding code
+        # mirrors it into record['cookie_file'] already, keeping it in
+        # ``headers`` would just duplicate the path in two places.
+        if name == "_cookie_file":
+            continue
+        redacted[name] = value
+    return redacted
+
+
 class HistoryPanel(QWidget):
     """下载历史面板"""
     
@@ -321,12 +368,17 @@ class HistoryPanel(QWidget):
                     history = []
             
             # 添加新记录
+            # Audit-finding High #3: strip Cookie / Authorization /
+            # X-Session-Token before persisting. The raw mapping is only
+            # used for the short-lived ``cookie_file`` mirror below;
+            # everything written into history must be safe to share.
+            safe_headers = _redact_headers_for_history(headers)
             record = {
                 'filename': filename,
                 'url': url,
                 'status': status,
                 'size': size,
-                'headers': headers or {},
+                'headers': safe_headers,
                 'engine': engine or '',
                 'save_dir': save_dir or '',
                 'selected_variant': selected_variant or None,

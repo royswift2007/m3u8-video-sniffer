@@ -1,8 +1,9 @@
 {
+    "version": 1,
     "download_dir": "C:\\Users\\qinghua\\Downloads",
     "temp_dir": "C:\\Users\\qinghua\\AppData\\Local\\Temp\\M3U8Sniffer",
-    "max_concurrent_downloads": 1,
-    "speed_limit": 2,
+    "max_concurrent_downloads": 5,
+    "speed_limit": 3,
     "max_retry_attempts": 3,
     "retry_backoff_seconds": 2,
     "site_rules": [],
@@ -23,6 +24,7 @@
         "network_verify_tls": true,
         "hls_probe_enabled": true,
         "hls_probe_hard_fail": true,
+        "allow_segment_probe_soft_fail": true,
         "browser_capture_window_enabled": true,
         "browser_capture_window_seconds": 12,
         "browser_capture_extend_on_hit_seconds": 4,
@@ -33,7 +35,7 @@
     "engines": {
         "n_m3u8dl_re": {
             "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\N_m3u8DL-RE.exe",
-            "thread_count": 1,
+            "thread_count": 5,
             "thread_min": 4,
             "thread_max": 32,
             "retry_count": 3,
@@ -58,13 +60,14 @@
     },
     "notification_enabled": true,
     "auto_delete_temp": true,
-    "language": "zh",
+    "language": "en",
     "proxy": {
         "enabled": false,
         "http": "",
         "https": ""
     },
     "_说明": {
+        "version": "配置文件 schema 版本，勿手动修改，升级时自动迁移",
         "max_concurrent_downloads": "同时下载任务数，建议 2-3",
         "speed_limit": "下载限速(MB/s)，0 表示不限速",
         "max_retry_attempts": "任务最大重试次数（含引擎切换）",

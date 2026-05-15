@@ -1,0 +1,31 @@
+{
+  "include": [
+    "core/task_model.py",
+    "ui/main_window.py",
+    "ui/main_window_actions.py",
+    "ui/main_window_sniff_flow.py"
+  ],
+  "exclude": [
+    "**/build",
+    "**/dist",
+    "**/.venv",
+    "**/venv",
+    "**/__pycache__",
+    "installer/output"
+  ],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "reportArgumentType": "error",
+  "reportGeneralTypeIssues": "error",
+  "reportIncompatibleMethodOverride": "error",
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownParameterType": "none",
+  "reportMissingTypeArgument": "none",
+  "reportMissingTypeStubs": "none",
+  "reportUntypedFunctionDecorator": "none",
+  "reportPrivateUsage": "none",
+  "reportUnusedImport": "none",
+  "reportUnusedVariable": "none"
+}

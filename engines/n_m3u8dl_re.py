@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 from core.task_model import DownloadTask
-from engines.base_engine import BaseEngine
+from engines.base_engine import BaseEngine, EngineResult
 from utils.config_manager import config
 from utils.logger import logger
 
@@ -46,17 +46,19 @@ class N_m3u8DL_RE_Engine(BaseEngine):
 
         options: set[str] = set()
         try:
-            creation_flags = 0
-            if hasattr(subprocess, "CREATE_NO_WINDOW"):
-                creation_flags = subprocess.CREATE_NO_WINDOW
-
+            # Probe-only path: ``--help`` returns in <1s and we need the
+            # captured text synchronously, so we keep ``subprocess.run``
+            # here rather than routing through ``BaseEngine.spawn`` +
+            # ``read_loop``. ``getattr`` keeps the one-liner portable to
+            # non-Windows hosts where ``CREATE_NO_WINDOW`` is undefined
+            # (task 29.2).
             result = subprocess.run(
                 [self.binary_path, "--help"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="ignore",
-                creationflags=creation_flags,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 timeout=10,
             )
             help_text = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
@@ -103,8 +105,7 @@ class N_m3u8DL_RE_Engine(BaseEngine):
                     f"[N_m3u8DL-RE] 尝试地址: {source_label} -> {source_url}",
                     event="nm3u8dlre_source_try",
                 )
-                logger.info(f"[N_m3u8DL-RE] 完整命令: {' '.join(cmd)}")
-                logger.info(f"[N_m3u8DL-RE] 参数列表: {cmd}")
+                self.log_command(cmd)
 
                 ok, tail_text = self._run_command(
                     task,
@@ -132,7 +133,8 @@ class N_m3u8DL_RE_Engine(BaseEngine):
                         safe_mode=True,
                         allow_select_video=allow_select_video,
                     )
-                    logger.info(f"[N_m3u8DL-RE] 安全模式命令: {' '.join(safe_cmd)}")
+                    logger.info(f"[N_m3u8DL-RE] 安全模式命令")
+                    self.log_command(safe_cmd, action="safe_mode")
                     ok_safe, tail_safe = self._run_command(
                         task,
                         safe_cmd,
@@ -199,42 +201,41 @@ class N_m3u8DL_RE_Engine(BaseEngine):
         recoverable: bool = False,
     ) -> tuple[bool, str]:
         """Run command once and return (ok, tail_text)."""
-        creation_flags = 0
-        if hasattr(subprocess, "CREATE_NO_WINDOW"):
-            creation_flags = subprocess.CREATE_NO_WINDOW
-
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            creationflags=creation_flags,
-        )
+        # ``BaseEngine.spawn`` (task 29.1) unifies CREATE_NO_WINDOW /
+        # close_fds / byte-mode PIPE handling. The caller (``download`` /
+        # safe-mode branch) already emitted a redacted argv via
+        # ``self.log_command(cmd)`` before we were invoked, so we pass
+        # ``sensitive=False`` to avoid duplicating that line. ``read_loop``
+        # drains stdout and stderr on independent pump threads (task 9.2);
+        # ``_parse_line`` is tag-agnostic — progress scraping and tail
+        # accumulation both apply uniformly — so the legacy
+        # ``stderr=STDOUT`` merge is redundant.
+        process = self.spawn(cmd, sensitive=False)
 
         task.process = process
-        output_lines = []
-        stdout = process.stdout
-        if stdout is not None:
-            for line in stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                output_lines.append(line)
-                if "%" in line or "B/s" in line or "iB/s" in line or "Kbps" in line or "Mbps" in line:
-                    logger.info(f"[N_m3u8DL-RE RAW] {line}")
-                progress_data = self.parse_progress(line)
-                if progress_data["progress"] > 0 or progress_data["speed"]:
-                    logger.debug(
-                        f"[N_m3u8DL-RE PARSED] 进度={progress_data['progress']}% 速度={progress_data['speed']}"
-                    )
-                    progress_callback(progress_data)
 
-        returncode = process.wait()
-        if returncode == 0:
+        # Per-call state consumed by ``_parse_line``.
+        output_lines: list[str] = []
+        self._tls.progress_callback = progress_callback
+        self._tls.output_lines = output_lines
+
+        try:
+            result: EngineResult = self.read_loop(process, task, self._parse_line)
+        finally:
+            self._tls.progress_callback = None
+            self._tls.output_lines = None
+
+        # Stop-request dispositions propagate to the caller as failure; the
+        # DownloadManager inspects ``task.stop_reason`` to distinguish user
+        # cancels from real errors, so we don't need to synthesize anything
+        # here.
+        if result.status in {"stopped", "switched", "paused"}:
+            return False, ""
+
+        if result.status == "ok":
             return True, ""
 
+        returncode = result.returncode if result.returncode is not None else -1
         self._log_failure(
             f"[N_m3u8DL-RE] 下载失败: {task.filename}, 退出码: {returncode}",
             recoverable=recoverable,
@@ -250,6 +251,28 @@ class N_m3u8DL_RE_Engine(BaseEngine):
             )
         task.error_message = tail_text or f"N_m3u8DL-RE exit code: {returncode}"
         return False, tail_text
+
+    def _parse_line(self, stream_tag: str, text: str) -> None:
+        """``read_loop`` callback: accumulate output and push progress events."""
+        line = text.strip()
+        if not line:
+            return
+
+        output_lines = getattr(self._tls, "output_lines", None)
+        if output_lines is not None:
+            output_lines.append(line)
+
+        if "%" in line or "B/s" in line or "iB/s" in line or "Kbps" in line or "Mbps" in line:
+            logger.info(f"[N_m3u8DL-RE RAW] {line}")
+
+        progress_data = self.parse_progress(line)
+        if progress_data["progress"] > 0 or progress_data["speed"]:
+            logger.debug(
+                f"[N_m3u8DL-RE PARSED] 进度={progress_data['progress']}% 速度={progress_data['speed']}"
+            )
+            progress_callback = getattr(self._tls, "progress_callback", None)
+            if progress_callback is not None:
+                progress_callback(progress_data)
 
     def _build_command(
         self,
@@ -267,7 +290,9 @@ class N_m3u8DL_RE_Engine(BaseEngine):
         max_retry = config.get("engines.n_m3u8dl_re.max_retry", retry_count)
         adaptive = config.get("engines.n_m3u8dl_re.adaptive", False)
         output_format = config.get("engines.n_m3u8dl_re.output_format", "mp4")
-        speed_limit = config.get("speed_limit", 0)  # MB/s
+        # Task 27.3: speed_limit unit is MB/s (mebibytes/s); a value of 0 means
+        # "no limit" and is not forwarded as a flag.
+        speed_limit = config.get("speed_limit", 0)
         force_http1 = config.get("engines.n_m3u8dl_re.force_http1", False)
         no_date_info = config.get("engines.n_m3u8dl_re.no_date_info", False)
 
@@ -349,10 +374,26 @@ class N_m3u8DL_RE_Engine(BaseEngine):
             speed_limit = 0
 
         if speed_limit > 0:
-            speed_mbps = speed_limit * 8
-            limit_str = f"{int(speed_mbps)}M" if speed_mbps.is_integer() else f"{speed_mbps}M"
-            logger.info(f"[N_m3u8DL-RE] 应用限速: {speed_limit} MB/s -> {limit_str}bps")
-            append_option("--max-speed", limit_str)
+            # Task 27.3: unify speed-limit semantics across engines. The UI
+            # value is interpreted as N MB/s (mebibytes/s, NOT Mbps).
+            # ``N_m3u8DL-RE --max-speed`` accepts the same byte-rate
+            # semantics when the value carries an ``M`` suffix (``15M`` ==
+            # 15 MiB/s), so we forward the UI value directly without the
+            # legacy ``* 8`` bit conversion that produced bps-confused
+            # rates. ``--max-download-speed`` is accepted as an alias on
+            # newer binaries; we fall back to ``--max-speed`` via
+            # ``append_option``'s supported-flag gate.
+            if float(speed_limit).is_integer():
+                limit_value = str(int(speed_limit))
+            else:
+                limit_value = str(speed_limit)
+            logger.info(
+                f"[N_m3u8DL-RE] 应用限速: {speed_limit} MB/s -> {limit_value}M (mebibytes/s)"
+            )
+            if "--max-download-speed" in supported_options:
+                append_option("--max-download-speed", f"{limit_value}MB")
+            else:
+                append_option("--max-speed", f"{limit_value}M")
 
         if output_format.lower() == "mp4":
             append_option("--mux-after-done", "format=mp4")

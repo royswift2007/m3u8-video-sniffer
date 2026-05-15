@@ -150,7 +150,7 @@ class LogPanel(QWidget):
                     if is_key_log or is_important_level:
                         # 使用信号发射（线程安全）
                         self.widget.log_signal.emit(msg, record.levelname)
-                except Exception:
+                except Exception:  # NOSONAR: we are inside a logging.Handler.emit; any logger call here would recurse back through this same handler and deadlock the UI thread.
                     # 忽略日志处理器中的异常，避免递归
                     pass
         
@@ -180,9 +180,11 @@ class LogPanel(QWidget):
             # 自动滚动
             if self.auto_scroll_btn.isChecked():
                 self.log_text.moveCursor(QTextCursor.MoveOperation.End)
-        except Exception:
-            # 忽略 UI 更新异常
-            pass
+        except RuntimeError:
+            # Underlying QObject已销毁（Qt widget teardown）或光标失效；
+            # 忽略以免 UI 线程在退出期间崩溃。Redacted intentionally — details
+            # would spam the log view this very panel is rendering.
+            logger.debug("log_panel: skip UI append during widget teardown")
     
     def clear_logs(self):
         """清空日志"""

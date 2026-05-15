@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "description": "Engine selection rules consumed by core.engine_rules_loader. Read-only at runtime; edit to tune engine routing without code changes.",
+  "direct_extensions": [
+    ".mp4",
+    ".flv",
+    ".ts",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".webm",
+    ".m4v",
+    ".3gp",
+    ".mpg",
+    ".mpeg",
+    ".f4v"
+  ],
+  "hls_extensions": [
+    ".m3u8",
+    ".mpd"
+  ],
+  "live_platforms": [
+    "twitch.tv",
+    "douyu.com",
+    "huya.com",
+    "youtube.com/live",
+    "bilibili.com/live",
+    "afreecatv.com",
+    "mixer.com",
+    "facebook.com/live"
+  ]
+}

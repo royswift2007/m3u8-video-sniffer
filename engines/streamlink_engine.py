@@ -1,10 +1,10 @@
 """
 Streamlink engine wrapper for live streaming downloads
 """
-import subprocess
 import re
 from pathlib import Path
-from engines.base_engine import BaseEngine
+from urllib.parse import quote as _urlquote
+from engines.base_engine import BaseEngine, EngineResult
 from core.task_model import DownloadTask
 from utils.logger import logger
 
@@ -37,38 +37,36 @@ class StreamlinkEngine(BaseEngine):
         try:
             cmd = self._build_command(task)
             logger.info(f"[Streamlink] 开始录制直播: {task.filename}")
-            logger.debug(f"命令: {' '.join(cmd)}")
-            
-            # Windows 下隐藏 cmd 窗口
-            creation_flags = 0
-            if hasattr(subprocess, 'CREATE_NO_WINDOW'):
-                creation_flags = subprocess.CREATE_NO_WINDOW
-            
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='ignore',
-                creationflags=creation_flags
-            )
-            
+            self.log_command(cmd)
+
+            # ``BaseEngine.spawn`` centralizes the CREATE_NO_WINDOW /
+            # close_fds / byte-mode PIPE plumbing (task 29.1). Passing
+            # ``sensitive=False`` avoids the duplicate ``log_command`` that
+            # would otherwise re-emit the same redacted argv. ``read_loop``
+            # drains stdout and stderr independently (task 9.2) so the old
+            # ``stderr=STDOUT`` merge is unnecessary — ``_parse_line``
+            # already accumulates lines regardless of stream tag for the
+            # failure-diagnosis tail.
+            process = self.spawn(cmd, sensitive=False)
+
             task.process = process
-            output_lines = []
-            
-            for line in process.stdout:
-                line = line.strip()
-                if line:
-                    output_lines.append(line)
-                    logger.debug(f"[Streamlink] {line}")
-                    progress_data = self.parse_progress(line)
-                    if progress_data['downloaded'] or progress_data['speed']:
-                        progress_callback(progress_data)
-            
-            returncode = process.wait()
-            success = returncode == 0
-            
+            output_lines: list[str] = []
+
+            # ``_parse_line`` reads per-call state from the thread-local slot.
+            self._tls.progress_callback = progress_callback
+            self._tls.output_lines = output_lines
+            try:
+                result: EngineResult = self.read_loop(process, task, self._parse_line)
+            finally:
+                self._tls.progress_callback = None
+                self._tls.output_lines = None
+
+            if result.status in {"stopped", "switched", "paused"}:
+                return False
+
+            success = result.status == "ok"
+            returncode = result.returncode if result.returncode is not None else -1
+
             if success:
                 logger.info(f"[Streamlink] 录制完成: {task.filename}")
             else:
@@ -88,6 +86,23 @@ class StreamlinkEngine(BaseEngine):
             logger.error(f"[Streamlink] 录制异常: {e}")
             task.error_message = str(e)
             return False
+
+    def _parse_line(self, stream_tag: str, text: str) -> None:
+        """``read_loop`` callback: accumulate output and push progress events."""
+        line = text.strip()
+        if not line:
+            return
+
+        output_lines = getattr(self._tls, "output_lines", None)
+        if output_lines is not None:
+            output_lines.append(line)
+
+        logger.debug(f"[Streamlink] {line}")
+        progress_data = self.parse_progress(line)
+        if progress_data['downloaded'] or progress_data['speed']:
+            progress_callback = getattr(self._tls, "progress_callback", None)
+            if progress_callback is not None:
+                progress_callback(progress_data)
     
     def _diagnose_failure(self, output_text: str) -> tuple:
         """根据输出日志推断失败原因并给出建议"""
@@ -119,6 +134,43 @@ class StreamlinkEngine(BaseEngine):
 
         return reason, suggestions
 
+    @staticmethod
+    def build_cookie_args(cookie_str: str) -> list[str]:
+        """Split a ``Cookie`` header into repeated ``--http-cookie`` pairs.
+
+        Task 27.2 / Requirement 31.1-31.3: streamlink's ``--http-cookie`` flag
+        accepts a single ``name=value`` cookie per occurrence. The browser
+        cookie header may contain many pairs separated by ``;``. This helper
+        splits them, URL-encodes each value with ``safe=''`` so any ``;``,
+        ``=``, whitespace or non-ASCII byte inside a value survives the
+        CLI round-trip, and emits ``["--http-cookie", f"{name}={value}"]``
+        pairs.
+
+        - Pieces missing ``=`` (including trailing empties) are discarded.
+        - ``name`` is whitespace-stripped; empty-name pieces are discarded.
+        - ``value`` is NOT stripped before encoding (cookie values may legally
+          carry surrounding whitespace); trailing ``\\r\\n`` is quoted as well.
+        - The return order preserves input order.
+        - The raw cookie values never appear in engine logs: command logging
+          goes through :meth:`BaseEngine.log_command`, which applies the R3
+          redaction rules to ``--http-cookie name=value`` argv pairs.
+        """
+
+        if not cookie_str or not isinstance(cookie_str, str):
+            return []
+        args: list[str] = []
+        for raw in cookie_str.split(";"):
+            if "=" not in raw:
+                continue
+            name, _, value = raw.partition("=")
+            name = name.strip()
+            if not name:
+                continue
+            encoded = _urlquote(value, safe="")
+            args.append("--http-cookie")
+            args.append(f"{name}={encoded}")
+        return args
+
     def _build_command(self, task: DownloadTask) -> list:
         """构建录制命令"""
         # 直播流通常保存为 .ts 或 .flv 格式
@@ -137,7 +189,13 @@ class StreamlinkEngine(BaseEngine):
             cmd.extend(['--http-header', f'User-Agent={task.headers["user-agent"]}'])
         
         if task.headers.get('cookie'):
-            cmd.extend(['--http-cookie', task.headers['cookie']])
+            # Task 27.2: split the Cookie header on ``;`` and forward each
+            # ``name=value`` pair as its own ``--http-cookie`` argument so
+            # streamlink's CLI parser (which treats the value as a single
+            # cookie) receives well-formed pairs. Values are percent-encoded
+            # with ``safe=''`` to survive ``;`` / `` `` / `=`` inside values;
+            # empty-name pieces and pieces without ``=`` are discarded.
+            cmd.extend(self.build_cookie_args(task.headers['cookie']))
         
         if task.headers.get('referer'):
             cmd.extend(['--http-header', f'Referer={task.headers["referer"]}'])

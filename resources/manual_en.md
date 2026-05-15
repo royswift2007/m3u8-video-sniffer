@@ -1,4 +1,5 @@
 M3U8 Video Sniffer Detailed User Manual (Compiled According to the Current Actual Program Code)
+> Applies to program version: v0.4.1 (M3U8D)
 
 # Important Before First Run: Runtime Environment and Chrome Requirements
 
@@ -105,13 +106,26 @@ The program entry points and main execution chain are as follows:
     The current entry point actually supports the following parameters:
         --url
             A video or page URL passed in externally.
+            Validation: only `http` / `https` schemes are accepted, and the length must be at most 4096 characters.
+            The value is filtered for private-network and cloud-metadata targets (addresses such as
+            127/10/172.16-31/192.168/169.254/::1/fc00::/fe80:: and cloud-metadata endpoints like 169.254.169.254 are rejected).
+            When validation fails, the program exits with code 2 and does not start the UI.
 
         --headers
             A JSON string, typically in the following format:
             {"referer":"...","user-agent":"...","cookie":"..."}
+            Validation: the headers go through the same sanitation path as the CatCatch HTTP service —
+            header names may only contain `[A-Za-z0-9-]` and must be at most 64 characters;
+            values must not contain `\r \n \0` and must be at most 4096 characters;
+            only the allowlisted fields Referer / User-Agent / Origin / Cookie / Accept-Language are kept,
+            and any other fields are silently dropped.
 
         --filename
             The default filename or title for the incoming resource.
+            Validation: Windows reserved names (CON / PRN / AUX / NUL / COM1-9 / LPT1-9),
+            ASCII control characters, and trailing `.` / whitespace are stripped automatically;
+            the final absolute-path byte length is capped at 240;
+            when the value ends up fully empty, it falls back to `media_<timestamp>`.
 
     Actual execution logic:
         1. Start the main UI normally first.
@@ -141,7 +155,71 @@ The main interface is currently divided into 3 primary tabs:
     2. Resource List
     3. Download Center
 
-There is also a “Quick Manual” entry in the upper-right corner used to open this manual.
+There are also two entries in the upper-right corner: “Component Manager” and “Quick Manual”:
+    - Component Manager: opens the status and update-management window for external download components.
+    - Quick Manual: opens this manual.
+
+3.0 Component Manager and Auto-Update Notes
+    Entry location:
+        The main window now provides a “Component Manager” entry in the upper-right corner, in the same area as “Quick Manual”.
+
+    Information shown:
+        The Component Manager lists yt-dlp, N_m3u8DL-RE, FFmpeg, aria2c, and Streamlink, and shows the following information for each component:
+            - Local version
+            - Latest version
+            - Current status (for example installed, missing, update available, check failed, etc.)
+            - Local path
+
+    Common actions:
+        - Refresh Local Status: rescans the local bin directory and executable files, then updates local version, path, and missing-state information.
+        - Check Updates: reads remote release information online. It only checks the latest version and update availability; it does not automatically download or install anything.
+        - Update All Updatable: updates all components currently detected as updatable, with confirmation before execution.
+        - Per-component Install / Update / Retry: installs, updates, or retries a failed operation for one specific component. This is useful when you only need to fill in a missing component or update a selected component.
+
+    Behavior after startup:
+        After startup, the program only performs read-only checks and shows entry/status hints in the upper-right area. It will not automatically download, install, or replace any component in the background.
+
+    Installer and missing components:
+        When using the installer, required components (yt-dlp, N_m3u8DL-RE, and FFmpeg) are downloaded by default. Recommended components such as aria2c and Streamlink need to be selected in the installation wizard.
+        If a component is later found missing, outdated, or has an abnormal path, open “Component Manager” to install / update it.
+
+    Safety strategy:
+        - A second confirmation is required before updating to avoid accidental operations.
+        - Downloaded files are first saved into a separate staging directory instead of being written directly into the `bin` directory.
+        - Before installation, the update goes through a full verification chain:
+            · The manifest must provide either a `sha256` digest or a signature; when both are missing the task fails with `missing_checksum`.
+            · After the download finishes, the file is compared byte-by-byte against the manifest's `sha256`; on mismatch the task fails with `checksum_mismatch` and the staged file is removed.
+            · When the manifest includes a signature, Authenticode / a pre-shipped public key is used to verify it on Windows.
+            · A disk-space precheck runs before replacement (requiring 1.2× the expected size, i.e. a 20% headroom); if there is not enough room the task fails with `insufficient_disk` and the `bin` directory is left untouched.
+            · The `sha256` of the staged artifact is re-verified immediately before replacement; on mismatch the task fails with `staging_tampered`.
+        - Before replacement, the old file is saved as a `.bak` copy and kept until the next startup; if replacement fails, a rollback from `.bak` is attempted. No failure path modifies the `bin` directory.
+        - If a target engine file is being held open by another process, the task is marked `deferred_pending_restart` and will be retried automatically on the next startup.
+        - It is recommended to pause or finish active download tasks before updating components, because yt-dlp.exe, N_m3u8DL-RE.exe, ffmpeg.exe, aria2c.exe, streamlink.exe, or similar files may be occupied and fail to be replaced.
+
+    Layered sha256 sources (all five backends can be verified automatically):
+        Each backend publishes its releases differently, so the program tries the following sources in order to obtain a comparable sha256. The bottom line "no sha256, no install" is never bypassed:
+        - Static pin: a fixed expected digest is written into `deps.json` under `checksum.sha256`. aria2 1.37.0 uses this path (pure local byte-by-byte comparison, fastest and strictest).
+        - Dynamic sidecar (`checksum.sha256_url`): the official digest is read in real time from a sidecar file in the same Release.
+            · yt-dlp: the official `SHA2-256SUMS` manifest is fetched and the row matching the exact exe filename is picked.
+            · FFmpeg (gyan.dev build): the corresponding `.zip.sha256` file is fetched as the expected digest for the archive; after extraction into `bin` the sha256 of the extracted `ffmpeg.exe` is also recomputed.
+        - Trust-on-first-use (TOFU): the official releases of N_m3u8DL-RE and streamlink do not ship a standard sha256 sidecar today. The program downloads them only over HTTPS from a strict domain allowlist (`github.com` / `objects.githubusercontent.com` / the matching PyPI CDN), records the measured digest into `~/.m3u8d/component_pins.json` after the first successful install, and on every subsequent update of the same version fails with `pin_mismatch` and rolls back if the freshly downloaded file's sha256 does not match the recorded value. There is no silent overwrite.
+        - If none of the three sources above yields a comparable sha256 for a given backend, the task fails immediately with `missing_checksum` and installation is refused (a diagnostic mode can relax this with audit logging, but it is disabled by default).
+
+    Download progress and "does it look stuck?":
+        Component archives vary widely in size (yt-dlp ~12 MB, N_m3u8DL-RE ~30 MB, FFmpeg essentials build ~130 MB), so a single download can take anywhere from seconds to several minutes. To keep the UI from looking "frozen" on large archives:
+        - During the download phase, progress is emitted at coarser steps of "whichever is larger, 2% advance or 1 MiB accumulated"; the "Downloading" status in the UI keeps ticking instead of sitting on a fixed string.
+        - Each individual HTTPS request has a total timeout of 10 minutes (`network_timeout=600s`). A timeout failure is only declared after that threshold is crossed. A short period without new progress below that threshold does not mean failure; wait and observe the network first.
+        - If progress stays completely frozen for a long time while the network speed is zero, you can click "Retry" or "Cancel" in the Component Manager. The failure path never corrupts the `bin` directory.
+
+    Post-install version cross-check (relaxed compatibility match):
+        - After the file is copied or replaced into `bin`, the program calls the target engine's own `--version` (or an equivalent command) to read back the real version string and compares it against the target version declared by the manifest / remote source. The update is considered "finished" only when the comparison passes.
+        - The comparison uses a "compatibility match" rule: leading `v` / `V` and surrounding whitespace are stripped from both sides, and the two strings are considered compatible when one is a prefix of the other AND the next character after the prefix is one of `.` `-` `_` `+` space, or end-of-string.
+            · Examples: target `8.1.1` is compatible with engine output `8.1.1-essentials_build-www.gyan.dev`, `ffmpeg version 8.1.1 Copyright ...`, `v8.1.1`, and so on; no false failure.
+            · But `8.1.1` is NOT compatible with `8.1.10` (the next character is the digit `0`, which is not in the separator set), and the task fails with `version_mismatch`.
+        - As soon as the cross-check reports `version_mismatch`, the previously-kept `.bak` is rolled back immediately so the old version can continue to be used.
+
+    Display tips:
+        If a local path, version number, or remote version string is too long, the table may show truncated text. Hover over the corresponding cell to view the full content.
 
 3.1 Composition of the Browser Workbench Tab
     The top toolbar contains:
@@ -333,11 +411,11 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
 
     Usage:
         1. Enter keywords in the search box to search the title, full URL in the tooltip, and source text.
-        2. Narrow the range via “All Types / M3U8 / MPD / MP4 ...”.
+        2. Narrow the range via “All Types / M3U8 / MPD / MP4 ...”. The Type column follows a simple display rule: container formats such as m3u8 / mpd / mp4 / flv / mkv / webm / ts are shown with their uppercase literal name (`M3U8` / `MPD` / `MP4` / `FLV` / `MKV` / `WEBM` / `TS`), while only the three semantic labels `Unknown` / `Video Stream` / `Playlist` go through UI localization, so the dropdown matches the visible text exactly.
         3. Use the source filter to locate resources from a specific page source.
         4. Use options such as 2160 / 1080 / 720 / Audio to filter resolution.
 
-5.4 Download Selected / Remove Selected / Clear List
+5.4 Download Selected / Remove Selected / Clear List / Clear Temp Files
     Download Selected:
         Executes the download logic one by one for the currently selected multiple rows.
 
@@ -346,6 +424,11 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
 
     Clear List:
         Clears the resource table, deduplication cache, `page_url` mappings, and filter conditions.
+
+    Clear Temp Files:
+        A dedicated entry (button or menu item) that only cleans intermediate download artifacts (`.part` / `.tmp` / leftover segments) under `temp_dir`.
+        It is no longer performed implicitly by the add-task path, so it will not delete segments of a task you are currently downloading.
+        Run it manually when disk space is tight.
 
 5.5 Automatic M3U8 Parsing and Variant Expansion
     When a master m3u8 resource is added to the list, `ResourcePanel` automatically starts the background thread `M3U8FetchThread`:
@@ -377,6 +460,15 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
 
         C. Other resources
             - Directly create a download task and enqueue it.
+
+    Enqueue result feedback (four possible outcomes after clicking Download):
+        Regardless of which branch (A / B / C) is taken, enqueue ultimately goes through the download manager's
+        `add_resource`, and the UI surfaces one of the following four explicit outcomes so the user is never left
+        wondering whether the click did anything:
+            - `queued`: the new task was enqueued normally; a matching row appears in the Download Queue, and you can continue tracking it in the Download Center.
+            - `merged`: an identical task already exists (the idempotency key `sha1(url|engine|out_dir|title)` hit a live entry), so this click is merged into the existing task and no second duplicate row is created in the queue. The status bar shows "Merged into existing task".
+            - `needs_confirmation`: the pre-enqueue disk precheck failed (by default the target drive must have at least 1.2× the estimated size of free space). The program pops a dialog letting you choose "Continue / Cancel"; choosing Continue is recorded with `disk_precheck=bypassed` for audit. If you make no choice, the task is NOT enqueued so you do not run out of space mid-download.
+            - `failed`: the URL / headers were rejected after going through the same sanitation path as the protocol handler (private / cloud-metadata addresses, non-http(s) schemes, over-length URL, over-length or malformed headers, and so on). The status bar shows the reason, and no row appears in the queue.
 
 5.7 How to Use the yt-dlp Format-Selection Dialog
     Implementation:
@@ -459,18 +551,24 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
         - Increase it: multiple tasks can download at the same time, but this consumes more bandwidth and disk resources.
         - Decrease it: more stable, suitable for sites prone to 403 errors or unstable networks.
 
+    Dynamic adjustment:
+        When concurrency is lowered from N to M (M<N), the most recently started N-M workers receive a soft-exit signal
+        and finish naturally once their current task completes. If any of them does not exit within 30 seconds,
+        a `worker_exit_timeout` warning is recorded, but tasks that are already downloading are never force-killed.
+        Raising concurrency spawns new workers immediately; the `active_workers` indicator in the UI always reflects the real live count.
+
 6.5 Speed Limit
     Corresponding configuration item:
         speed_limit
 
     Meaning in the UI:
-        The unit is MB/s; 0 means unlimited.
+        The unit is always MB/s; 0 means unlimited.
 
     Actual effect:
-        - N_m3u8DL-RE: converted into the `--max-speed` parameter.
-        - yt-dlp: uses `--limit-rate`.
-        - Aria2: uses `--max-download-limit`.
-        - Streamlink currently does not have dedicated rate limiting tied to this parameter.
+        - N_m3u8DL-RE: converted into `--max-download-speed {N}MB`.
+        - Aria2: converted into `--max-overall-download-limit={N}M`.
+        - yt-dlp: converted into `--limit-rate` (expanded on a MB/s basis).
+        - Streamlink currently does not apply a dedicated download-rate limit from this parameter.
 
     Usage recommendations:
         - When you encounter network fluctuation, disconnects, or certificate / gateway issues, moderate rate limiting may help.
@@ -554,6 +652,17 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
         A task stores not only the final download URL, but also context such as source resolution, master-playlist address, and failure state.
 
 7.2 Engine-Selection Priority
+    Combined decision order (highest priority first):
+        1. The engine the user manually selected in the UI (highest priority).
+        2. File-extension inference (the URL query string is stripped before matching).
+        3. MIME probing via HEAD request (2 s timeout, protected by the private-network / cloud-metadata filter;
+           on probe failure it falls back to extension inference and records `engine_select=fallback`).
+        4. Live-platform list match (`LIVE_PLATFORMS`).
+        5. yt-dlp as the final fallback.
+
+    The decision tables (file extensions and live-platform list) are externalized in `resources/engine_rules.json`
+    and can be edited directly without changing any code.
+
     The current automatic-selection order is:
         N_m3u8DL-RE -> Streamlink -> Aria2 -> yt-dlp
 
@@ -568,9 +677,16 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
         `DownloadManager` uses `Queue` + multiple worker threads.
 
     Flow:
-        1. `add_task()` sets the task status to `waiting`.
-        2. It selects the preferred engine according to the current settings and user preference.
-        3. Worker threads take tasks for execution according to the concurrency limit.
+        1. Idempotency precheck: the key `sha1(url|engine|out_dir|title)` is looked up first. If a task with the same key
+           already exists, the new request is merged into it (returning `merged`) so repeated "re-download" clicks
+           do not stack duplicate entries in the queue.
+        2. Disk-space precheck: an estimated size is read from the manifest (falling back to 500 MB when it cannot be read)
+           and compared with the free space on the disk that hosts the target directory. When space is insufficient,
+           you are prompted with `needs_confirmation=insufficient_disk` and can choose to continue or cancel;
+           choosing to bypass the precheck records `disk_precheck=bypassed`.
+        3. `add_task()` sets the task status to `waiting`.
+        4. It selects the preferred engine according to the current settings and user preference.
+        5. Worker threads take tasks for execution according to the concurrency limit.
 
 7.4 HLS Preflight Probe
     Corresponding feature toggles:
@@ -619,6 +735,14 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
         6. Timeout-type failures use incremental waiting according to `backoff_seconds`.
 
 7.7 Pause, Resume, Cancel, and Delete Tasks
+    Stop response time:
+        After you click "Pause" or "Cancel", every engine (N_m3u8DL-RE / yt-dlp / Streamlink / Aria2) breaks out of its
+        read loop and calls `terminate()` within 500 ms; if the process has not exited after 1.5 s, it is killed recursively.
+        The typical end-to-end response time is at most 2 seconds.
+        Cancelling during an FFmpeg merge of a large file cleans up intermediate `.part` / `.tmp` files while keeping
+        the artifacts from the previous completed step (for example, if the segments have finished downloading but
+        the merge has not completed, the segments are kept so you can resume later).
+
     Pause:
         - Mark `stop_requested=True`
         - `stop_reason=paused`
@@ -689,7 +813,25 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
     How Cookies are actually used:
         - The program infers the Cookies filename based on the URL; for example, YouTube maps to `cookies/www.youtube.com_cookies.txt`.
         - If that file exists, it is used preferentially.
+        - When the exact match misses, the program falls back along `.` boundaries in the hostname:
+          `music.youtube.com` first tries `music.youtube.com_cookies.txt`, then `youtube.com_cookies.txt`,
+          then `com_cookies.txt`, and so on until a file is found or the suffix list is exhausted.
         - If not, Firefox Cookies fallback is attempted.
+
+    Console encoding:
+        On Windows, yt-dlp stdout is decoded through a three-tier fallback: utf-8 (`errors='replace'`) → mbcs
+        (the system ANSI code page, typically CP936) → latin-1.
+        When the decoder actually falls back to mbcs / latin-1, the log line is tagged with `decode=mbcs` / `decode=lossy`
+        so characters are never dropped silently.
+
+    format_id character set (non-numeric format IDs supported):
+        - Before the user- / dialog-selected `format_id` is handed to yt-dlp, it is validated against a strict allowlist: only characters matching `[A-Za-z0-9_.+:\-]+` are accepted.
+        - The following real-world format IDs from YouTube / Bilibili and similar sites are all accepted and do not need to be downgraded to "best quality":
+            · Pure numeric: `137`, `140`, `399`.
+            · Combined audio+video with `+`: `137+140`, `bestvideo+bestaudio`, `bestvideo[height<=1080]+bestaudio/best`.
+            · HLS / DASH prefixes: `hls-720`, `dash-480`, `http-720p`, `avc1_4d401f`.
+            · Colons, underscores, and dots: `ec-3_audio`, `video:1080p`, `audio.original`.
+        - Any string containing spaces, newlines, semicolons, pipes, backticks, `$()`, `&`, or `<>` is rejected with `invalid_format_id` and is never spliced into the command line. Even if the dialog is tampered with by a third party, it cannot become a command-injection entry point.
 
 8.3 Streamlink
     Suitable for:
@@ -700,6 +842,8 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
         - Output is usually saved as `.ts`.
         - When exact total progress is unavailable, it displays written size and speed.
         - On failure, it performs simple cause diagnosis such as 401 / 403 / timeout / geo-restriction.
+        - Cookies are split automatically on `;`: `a=1; b=2` becomes two separate `--http-cookie "a=1"` and `--http-cookie "b=2"` arguments,
+          values are URL-escaped, and entries with an empty name or without `=` are dropped.
 
 8.4 Aria2
     Suitable for:
@@ -724,6 +868,11 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
     Description:
         It is currently more like an integrated post-processing capability than a high-frequency entry point in the main UI.
 
+    Cancel during merge:
+        Large-file merges run through a cancellable read loop. When the operation is cancelled, intermediate `.part` / `.tmp`
+        files are cleaned up while artifacts from the previous completed step are kept (for example, if the segments
+        have finished downloading but the merge has not completed, the segments are preserved so you can resume later).
+
 
 ================================================================================
 9. Logs, History, and Notifications
@@ -744,6 +893,19 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
     Usage:
         - If you feel that “nothing happened after clicking”, check here first.
         - If a download fails, read the key error here first, then go to the log folder for the full log.
+
+    Default level and debug switches:
+        File-level logging defaults to INFO. To capture DEBUG output, set the environment variable `M3U8D_LOG_DEBUG=1`
+        and restart the program.
+        Sensitive headers in command lines and URLs (Cookie / Set-Cookie / Authorization / Proxy-Authorization /
+        X-Session-Token / User-Agent / Referer / Origin) as well as URL query parameters named `token` / `sign` /
+        `signature` / `auth` are replaced with `<redacted>` before log lines are written to disk, so they never land
+        on disk in plaintext.
+        When you need plaintext for troubleshooting, set `SECURITY_DEBUG=1` to enable a separate `debug.sensitive.log`
+        (disabled by default; be sure to disable it again once troubleshooting is done).
+        Logs rotate automatically by date and a new file is created when the day changes at midnight; when the total size
+        exceeds the limit, a throttled rotation kicks in (checked every 1000 entries or every 5 seconds), so enabling
+        high-frequency DEBUG will not slow down downloads.
 
 9.1.1 How to Understand Common Log Levels
     INFO: Indicates that the flow is progressing normally, or that one step has completed successfully.
@@ -795,6 +957,14 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
         - completed_at
         - cookie_file (if it existed at that time)
 
+    Sensitive-header stripping before writing to history:
+        Before `history.json` is written to disk, the `headers` field is filtered through a denylist so that short-lived tokens / credentials are not persisted to the user directory:
+            - The following keys (case-insensitive) are dropped entirely and will NOT appear in `history.json`:
+              `Cookie` / `Set-Cookie` / `Authorization` / `Proxy-Authorization` / `X-Session-Token` /
+              `X-Auth-Token` / `Token` / `Api-Key` / `X-Api-Key`.
+            - Fields that the downloader needs for reuse, such as `Referer` / `User-Agent` / `Origin` / `Accept-Language`, are kept verbatim so "right-click → Re-download" can still start with the correct context.
+            - The stripping only happens at the point of writing to `history.json`; running tasks still hold the full headers. Because of that, "Re-download" from history gets the already-stripped headers back. If that causes auth failures, add the missing `Cookie` / `Authorization` value back through site rules or external headers passed at launch.
+
     Supported actions in the context menu:
         - Re-download
         - Open file location
@@ -817,9 +987,51 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
 10.1 CatCatch HTTP Service
     At startup, the main window creates `CatCatchServer` and automatically starts the local HTTP service.
 
+    Bind address:
+        The service binds strictly to `127.0.0.1` and never to `0.0.0.0` / `::`.
+
     Port strategy:
         - Prefer 9527
         - If occupied, try 9528 ~ 9539
+        - When every candidate port fails, `bind_timeout` or `port_exhausted` is logged and the UI is never left hanging.
+
+    Authentication and cross-site protection:
+        - At startup a one-time session token is generated at random and written to `~/.m3u8d/session.token`
+          (POSIX permission 0600 / owner-only DACL on Windows) for trusted clients to read.
+        - Every request's `Origin` / `Referer` must be on the allowlist; the default allowlist contains the four
+          loopback variants `http://127.0.0.1`, `http://localhost`, `https://127.0.0.1`, and `https://localhost`.
+        - `POST /download` additionally requires the `X-Session-Token` header to match the current session token:
+          when it is missing or wrong the service returns 401; when the `Origin` is not on the allowlist it returns 403
+          and does not echo back any `Access-Control-Allow-*` header.
+        - `Access-Control-Allow-Origin` only echoes back the specific allowlisted origin and is never `*`.
+
+    URL protection (SSRF filtering):
+        - The `url` received by `POST /download` first goes through a public-address check (`ensure_public()`); the following targets are rejected with **400 Bad Request** and are never added to the queue:
+            · Loopback: `127.0.0.0/8`, `::1`.
+            · Private ranges: `10/8`, `172.16/12`, `192.168/16`, `fc00::/7`.
+            · Link-local: `169.254/16`, `fe80::/10`.
+            · Cloud metadata: `169.254.169.254` (IMDSv1/v2 endpoint) and other common cloud-internal endpoints.
+            · Non-`http` / `https` schemes, over-length URLs (>4096), or hostnames that cannot be resolved to an IP (resolution failure is treated as untrusted).
+        - This filter shares its code path with `main.py --url` and the protocol handler, so URLs coming in through the browser extension, the `m3u8dl://` protocol, or the command line are all validated by the same rule set.
+
+    Internal marker protection (external `_`-prefixed headers are rejected):
+        - Internally the program may attach one-shot hints (such as "which cookies file should this task use") to the headers dict as underscore-prefixed keys like `_cookie_file`. These are strictly for engine-side consumption.
+        - Before `POST /download`'s `headers` field is forwarded, every key starting with `_` is dropped. This prevents external callers from disguising a key as "it looks internal" to bypass the allowlist or to inject an arbitrary local path into an engine command line. The `m3u8dl://` protocol handler applies the same stripping to its JSON payload.
+        - As a result, neither the browser extension, an external script, nor the protocol handler can make the program read an arbitrary file by writing `_cookie_file: C:\...` into the JSON body. The real cookie-file path is only ever derived internally from the URL.
+
+    Headers forwarded to engines are sanitized:
+        - Header names may only contain `[A-Za-z0-9-]` and must be at most 64 characters; values must not contain
+          `\r \n \0` and must be at most 4096 characters.
+        - Only the allowlisted fields Referer / User-Agent / Origin / Cookie / Accept-Language are forwarded;
+          other fields are silently dropped.
+        - When forwarded to an engine command line, headers are always passed through a parameterized argument array;
+          string concatenation is never used.
+
+    Request size limit:
+        The `POST /download` request body is capped at **64 KiB**. When that limit is exceeded the service returns
+        **413 Request Entity Too Large** and writes a `catcatch_body_too_large` entry in the log. Normal browser-extension
+        payloads (URL + headers + filename, typically a few KiB) sit comfortably below this ceiling and are never
+        affected by it.
 
     Endpoints:
         GET /
@@ -829,7 +1041,7 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
             Returns runtime status.
 
         GET /download?url=...&name=...
-            Adds a task through a simple GET method.
+            This GET endpoint now returns **405 Method Not Allowed** and no longer triggers any download action. The reason is that a read-only GET cannot be protected by a session token, so all download requests are funneled through the authenticated `POST /download` + `X-Session-Token` path. External callers should switch to POST; the read-only `GET /` and `GET /status` endpoints remain available and still do not require authentication.
 
         POST /download
             Accepts JSON or form.
@@ -851,9 +1063,25 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
 
     Actual execution flow:
         1. Parse the incoming protocol content.
-        2. First try to POST the task to the running main program.
-        3. If the local program is not running, start `main.py` and pass `--url` / `--headers` / `--filename`.
-        4. Try delivering to the GUI program again.
+        2. Read `~/.m3u8d/session.token` for the `X-Session-Token` header, attach `Origin: http://127.0.0.1`,
+           and POST `/download` to each candidate port from 9527 to 9539 in turn. The first port that returns
+           a 2xx response counts as a successful handshake and no new main instance is launched.
+        3. Only when every candidate port fails to hand off (the main program really is not running,
+           the token file is missing, or the token is no longer valid) does the handler start `main.py`
+           with `--url` / `--headers` / `--filename`.
+        4. After the new process comes up, `send_to_app` is polled for up to 12 seconds to deliver the link
+           into the new instance's resource list.
+
+    Log redaction:
+        `logs/protocol_handler.log` never records the token in plaintext and only keeps redacted metadata such as
+        `token_loaded=<bool>` / `token_len=<int>` / `status_code=<int>` / `auth_ok=<bool>`.
+
+    Emergency rollback:
+        If some environment cannot use the handshake for the moment (for example, the token file is quarantined
+        by security software while the main program is still running), you can set the environment variable
+        `M3U8D_HANDOFF_LEGACY=1` to temporarily revert to the legacy behavior (no token read, no Origin header,
+        only a 2xx check). Every such call writes an extra legacy marker line so you can spot it in the log.
+        It is disabled by default; please unset the variable once diagnosis is done.
 
     Usage scenarios:
         - A browser extension sends resources back to the desktop program with one click.
@@ -1064,6 +1292,30 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
         Meaning: if provided in the configuration, it can specify the preferred port of `CatCatchServer`; the default is 9527.
 
 
+11.7 Environment Variables
+    The following environment variables affect runtime behavior. They are all disabled by default, and changes take effect after restarting the program.
+
+    M3U8D_LOG_DEBUG
+        Meaning: when set to `1`, raises the file-level log level from the default INFO to DEBUG.
+        Note: keep it disabled during normal use, and only enable it when you need to capture detailed runtime traces.
+
+    SECURITY_DEBUG
+        Meaning: when set to `1`, enables a separate `debug.sensitive.log` that records the raw content of command lines
+        and sensitive headers for troubleshooting.
+        Note: this file lives alongside the main logs but in a dedicated file. Once troubleshooting is done, disable the
+        variable or remove the file so sensitive content does not linger on disk.
+
+    M3U8D_HANDOFF_LEGACY
+        Meaning: when set to `1`, the protocol handler falls back to the legacy behavior (no token read, no Origin header,
+        only a 2xx check), acting as an emergency rollback channel when `m3u8dl://` delivery misbehaves.
+        Keep it disabled during day-to-day use.
+
+    M3U8D_SECURITY_DIAGNOSTIC
+        Meaning: when set to `1` together with `security.allow_weak_manifest_verification=true` in the configuration,
+        component updates are allowed to relax manifest verification in diagnostic mode.
+        Note: only use this for offline diagnosis; in production both switches must remain disabled.
+
+
 ================================================================================
 12. Common Operation Examples
 ================================================================================
@@ -1153,6 +1405,17 @@ There is also a “Quick Manual” entry in the upper-right corner used to open 
 
 13.6 Why Can Old Tasks Still Be Re-downloaded from History?
     Because the history stores not only the URL, but also tries to preserve context such as `headers`, `engine`, `save_dir`, `selected_variant`, `master_url`, `media_url`, etc.
+
+13.7 Private or LAN Addresses Cannot Be Downloaded
+    To reduce the risk of using this program to reach internal networks or cloud-metadata endpoints
+    (`127.0.0.1`, `10.x`, `172.16/12`, `192.168.x`, `169.254.x`, `fc00::/7`, and similar ranges),
+    m3u8 parsing and fetching reject non-public addresses by default. The log will show markers such as
+    `SSRFBlocked` or `ssrf_blocked`.
+
+    If you genuinely need to download through a public-facing domain that a corporate reverse proxy
+    forwards into an internal network, set `allow_private_networks` to `true` inside `features` in
+    `config.json` and restart the program. The log will print a prominent warning to indicate that this
+    is a reduced-privilege path. Regular users should keep the default of `false`.
 
 
 ================================================================================

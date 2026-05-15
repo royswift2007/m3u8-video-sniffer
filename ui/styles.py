@@ -229,6 +229,8 @@ QTreeWidget {
 }
 
 /* 右上角入口统一：扁平化链接/按钮风格 */
+#component_manager_button,
+#component_manager_button_badged,
 #language_button,
 #manual_link {
     color: #1a3a5f;
@@ -246,10 +248,33 @@ QTreeWidget {
     width: 0px;
 }
 
+#component_manager_button:hover,
+#component_manager_button_badged:hover,
 #language_button:hover,
 #manual_link:hover {
     color: #2a5a8f;
     background-color: rgba(0, 0, 0, 0.05);
+}
+
+#component_manager_button_badged {
+    color: #9f4d2d;
+    background-color: rgba(184, 92, 56, 0.12);
+    border: 1px solid rgba(184, 92, 56, 0.25);
+    border-radius: 8px;
+    font-weight: 700;
+}
+
+QPushButton[objectName="component_batch_update_button"] {
+    background-color: #b85c38;
+}
+
+QPushButton[objectName="component_batch_update_button"]:hover {
+    background-color: #9f4d2d;
+}
+
+QPushButton[objectName="component_batch_update_button"]:disabled {
+    background-color: #b8b4ac;
+    color: #f6f4f0;
 }
 
 /* 弹出菜单外观美化 */
@@ -506,6 +531,80 @@ QLabel[objectName="status_chip"] {
     border: none;
     padding: 0;
     font-weight: 500;
+}
+
+QPushButton[objectName="component_primary_button"] {
+    background-color: #2f7d60;
+}
+
+QPushButton[objectName="component_primary_button"]:hover {
+    background-color: #25654e;
+}
+
+QPushButton[objectName="component_action_button"] {
+    background-color: #5f8cc0;
+    color: #ffffff;
+    padding: 4px 12px;
+    min-width: 104px;
+    min-height: 18px;
+    font-size: 9pt;
+}
+
+QPushButton[objectName="component_action_button"]:hover {
+    background-color: #4f7db0;
+}
+
+QPushButton[objectName="component_action_button"]:pressed {
+    background-color: #3f6b9c;
+}
+
+QPushButton[objectName="component_action_disabled"] {
+    background-color: #e0ddd6;
+    color: #7b746b;
+    padding: 4px 12px;
+    min-width: 104px;
+    min-height: 18px;
+    font-size: 9pt;
+}
+
+QLabel[objectName="component_summary_label"] {
+    color: #5f6b75;
+    font-weight: 600;
+}
+
+QTableWidget[objectName="component_manager_table"] {
+    background-color: #fffdf9;
+    alternate-background-color: #fbf7ef;
+}
+
+QTextEdit[objectName="component_manager_log_text"] {
+    font-family: Consolas, "Microsoft YaHei UI", monospace;
+    font-size: 9pt;
+}
+
+QLabel[objectName="component_status_ok"] {
+    color: #2f7d60;
+    font-weight: 700;
+}
+
+QLabel[objectName="component_status_update"] {
+    color: #b77943;
+    font-weight: 700;
+}
+
+QLabel[objectName="component_status_pending"] {
+    color: #22577a;
+    font-weight: 700;
+}
+
+QLabel[objectName="component_status_error"] {
+    color: #b85c38;
+    font-weight: 700;
+}
+
+QLabel[objectName="component_status_unknown"] {
+    color: #786f64;
+    font-weight: 700;
 }
 
 QFrame[objectName="card"] {

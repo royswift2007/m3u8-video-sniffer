@@ -9,15 +9,34 @@ import requests
 
 from utils.config_manager import config
 from utils.logger import logger
+from utils.redact import redact_url
+from utils.ssrf_guard import SSRFBlocked, ensure_public
 
 
 class HLSProbe:
     """Lightweight HLS probe: playlist -> key -> first segment."""
 
+    SOFT_SEGMENT_STATUS_CODES = {403, 429}
+    SOFT_SEGMENT_ERROR_KEYWORDS = (
+        "too many requests",
+        "rate limit",
+        "rate-limit",
+        "ratelimit",
+        "forbidden",
+        "hotlink",
+        "anti-leech",
+        "anti leech",
+        "referer",
+        "referrer",
+    )
+
     @classmethod
     def probe(cls, url: str, headers: dict | None = None, timeout: int = 8) -> dict:
         headers = (headers or {}).copy()
         verify_tls = bool(config.get("features.network_verify_tls", True))
+        allow_segment_probe_soft_fail = bool(
+            config.get("features.allow_segment_probe_soft_fail", True)
+        )
         if "User-Agent" not in headers and "user-agent" not in headers:
             headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         if not verify_tls:
@@ -31,10 +50,17 @@ class HLSProbe:
             "segment_url": "",
             "status_code": None,
             "error": "",
+            "warning": "",
+            "soft_fail": False,
+            "hard_fail": True,
+            "severity": "error",
         }
 
         try:
-            # 1) playlist fetch
+            # 1) playlist fetch. Playlist/master failures stay hard failures because the
+            # real downloader cannot start without a readable manifest.
+            # R4 SSRF filter: reject non-public manifest hosts before touching the network.
+            ensure_public(url)
             playlist_resp = requests.get(url, headers=headers, timeout=timeout, verify=verify_tls)
             result["status_code"] = getattr(playlist_resp, "status_code", None)
             playlist_resp.raise_for_status()
@@ -49,6 +75,8 @@ class HLSProbe:
                     result["stage"] = "playlist"
                     result["error"] = "master playlist has no resolvable variant"
                     return result
+                # R4 SSRF filter: re-check the variant URL (different host from the master is legal).
+                ensure_public(first_variant)
                 playlist_resp = requests.get(first_variant, headers=headers, timeout=timeout, verify=verify_tls)
                 result["status_code"] = getattr(playlist_resp, "status_code", None)
                 playlist_resp.raise_for_status()
@@ -64,37 +92,110 @@ class HLSProbe:
                 return result
             result["segment_url"] = first_segment
 
-            # 2) optional key fetch
+            # 2) optional key fetch. Key failures remain hard failures: an encrypted
+            # stream normally cannot be decrypted without a readable key.
             key_url = cls._pick_key_url(playlist_text, playlist_url)
             if key_url:
                 result["stage"] = "key"
                 result["key_url"] = key_url
+                # R4 SSRF filter: key URL is often hosted on a different host.
+                ensure_public(key_url)
                 key_resp = requests.get(key_url, headers=headers, timeout=timeout, verify=verify_tls)
+                result["status_code"] = getattr(key_resp, "status_code", None)
                 key_resp.raise_for_status()
 
-            # 3) first segment fetch (small range)
+            # 3) first segment fetch (small range). Segment probes are intentionally
+            # conservative: many CDNs rate-limit ad-hoc probe requests while the real
+            # downloader may still succeed with retries, cookies, and normal cadence.
             result["stage"] = "segment"
             seg_headers = headers.copy()
             if "Range" not in seg_headers and "range" not in seg_headers:
                 seg_headers["Range"] = "bytes=0-2047"
-            seg_resp = requests.get(
-                first_segment,
-                headers=seg_headers,
-                timeout=timeout,
-                verify=verify_tls,
-                stream=True,
-            )
-            seg_resp.raise_for_status()
-            seg_resp.close()
+            # R4 SSRF filter: segment URL may resolve differently from the playlist.
+            ensure_public(first_segment)
+            seg_resp = None
+            try:
+                seg_resp = requests.get(
+                    first_segment,
+                    headers=seg_headers,
+                    timeout=timeout,
+                    verify=verify_tls,
+                    stream=True,
+                )
+                result["status_code"] = getattr(seg_resp, "status_code", None)
+                seg_resp.raise_for_status()
+            except Exception as e:
+                if allow_segment_probe_soft_fail and cls._is_soft_segment_failure(e, result.get("status_code")):
+                    warning = f"segment probe soft-failed: {e}"
+                    result.update(
+                        {
+                            "ok": False,
+                            "soft_fail": True,
+                            "hard_fail": False,
+                            "severity": "warning",
+                            "warning": warning,
+                            "error": str(e),
+                        }
+                    )
+                    logger.warning(
+                        "[HLSProbe] segment probe soft-fail, allowing engine attempt",
+                        event="hls_probe_segment_soft_fail",
+                        url=url,
+                        segment=first_segment,
+                        status_code=result.get("status_code"),
+                        error=str(e),
+                    )
+                    return result
+                raise
+            finally:
+                if seg_resp is not None:
+                    seg_resp.close()
 
             result["ok"] = True
             result["stage"] = "ready"
+            result["hard_fail"] = False
+            result["severity"] = "ok"
+            return result
+
+        except SSRFBlocked as exc:
+            # Map the SSRF policy refusal to a structured probe failure.
+            # The ``stage`` field retains whatever step was in progress so
+            # the UI can tell the user which URL was rejected.
+            logger.warning(
+                f"[SSRF] HLS probe blocked: {exc.reason}",
+                event="hls_probe_ssrf_blocked",
+                stage="ssrf",
+                probe_stage=result.get("stage"),
+                reason=exc.reason,
+                url=redact_url(exc.url),
+            )
+            result["ok"] = False
+            result["soft_fail"] = False
+            result["hard_fail"] = True
+            result["severity"] = "error"
+            result["error"] = f"ssrf_blocked: {exc.reason}"
+            result["error_code"] = "ssrf_blocked"
             return result
 
         except Exception as e:
             result["ok"] = False
+            result["soft_fail"] = False
+            result["hard_fail"] = True
+            result["severity"] = "error"
             result["error"] = str(e)
             return result
+
+    @classmethod
+    def _is_soft_segment_failure(cls, exc: Exception, status_code: int | None = None) -> bool:
+        """Return True for segment-only probe failures that should not block engine execution."""
+        response = getattr(exc, "response", None)
+        response_status = getattr(response, "status_code", None)
+        effective_status = status_code if status_code is not None else response_status
+        if effective_status in cls.SOFT_SEGMENT_STATUS_CODES:
+            return True
+
+        text = str(exc).lower()
+        return any(keyword in text for keyword in cls.SOFT_SEGMENT_ERROR_KEYWORDS)
 
     @staticmethod
     def _pick_first_variant(playlist_text: str, base_url: str) -> str:

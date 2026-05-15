@@ -6,18 +6,31 @@ import shutil
 import sys
 import json
 import time
+import weakref
 from urllib.parse import urljoin, urlparse
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 from playwright.sync_api import sync_playwright
+from core.app_paths import get_temp_dir
 from core.playwright_profile import (
     create_temporary_user_data_dir,
     get_primary_user_data_dir,
     is_profile_lock_error,
 )
 from core.sniffer_script import SNIFFER_JS
+from engines.base_engine import kill_process_tree
 from utils.config_manager import config
 from utils.logger import logger
 from utils.i18n import TR
+
+# Historical + current fallback-profile directory prefixes. ``profile_`` is
+# produced by :func:`core.playwright_profile.create_temporary_user_data_dir`;
+# ``temp_profile_`` is kept for backwards compatibility with older builds.
+_STALE_PROFILE_PREFIXES = ("profile_", "temp_profile_")
+# Retention window for stale fallback profiles (R21.AC2).
+_STALE_PROFILE_MAX_AGE_SECONDS = 24 * 60 * 60
+# Wall-clock budget for waiting on the browser driver process during
+# cleanup before escalating to ``kill_process_tree`` (R21.AC1).
+_BROWSER_PROC_WAIT_TIMEOUT = 10.0
 
 class PlaywrightDriver(QThread):
     """Playwright 驱动线程"""
@@ -44,10 +57,29 @@ class PlaywrightDriver(QThread):
         self._capture_window_end = 0.0
         self._next_capture_probe_at = 0.0
         self._recent_emit_cache = {}
-        self._configured_page_ids = set()
+        # Track configured pages by weak reference so garbage-collected pages
+        # drop out automatically (R21.AC3). Fall back to ``page.guid`` string
+        # tracking when a Playwright Page object cannot be weakly referenced.
+        self._configured_pages = weakref.WeakSet()
+        self._configured_page_guids: set[str] = set()
         self._context_user_data_dir = None
         self._temporary_profile_dir = None
         self._load_capture_settings()
+        # Clean stale fallback profile directories from prior sessions
+        # (R21.AC2). Failures must not block startup.
+        self._cleanup_stale_profile_dirs()
+
+    def _page_guid(self, page) -> str | None:
+        """Return Playwright's stable page guid when available."""
+        guid = getattr(page, "guid", None)
+        if isinstance(guid, str) and guid:
+            return guid
+        impl = getattr(page, "_impl_obj", None)
+        if impl is not None:
+            inner = getattr(impl, "_guid", None)
+            if isinstance(inner, str) and inner:
+                return inner
+        return None
 
     def _remember_page_configured(self, page) -> bool:
         """
@@ -56,14 +88,44 @@ class PlaywrightDriver(QThread):
         """
         if not page:
             return True
-        page_id = id(page)
-        if page_id in self._configured_page_ids:
+
+        # Prefer WeakSet identity so entries vanish when pages are GC'd.
+        try:
+            if page in self._configured_pages:
+                return True
+        except TypeError:
+            # Unhashable page object (extremely unlikely) — fall through.
+            pass
+
+        guid = self._page_guid(page)
+        if guid is not None and guid in self._configured_page_guids:
             return True
-        self._configured_page_ids.add(page_id)
-        # Opportunistic cleanup to avoid unbounded growth in long sessions.
-        if len(self._configured_page_ids) > 256 and self.context:
-            alive_ids = {id(p) for p in self.context.pages}
-            self._configured_page_ids = self._configured_page_ids.intersection(alive_ids)
+
+        try:
+            self._configured_pages.add(page)
+        except TypeError:
+            # Page object does not support weak references on this
+            # Playwright version; rely on guid tracking instead.
+            pass
+        if guid is not None:
+            self._configured_page_guids.add(guid)
+
+        # Opportunistically prune guid cache to avoid unbounded growth in
+        # long-lived sessions where pages are closed frequently.
+        if len(self._configured_page_guids) > 256 and self.context:
+            try:
+                alive_guids = {
+                    g
+                    for g in (self._page_guid(p) for p in self.context.pages)
+                    if g is not None
+                }
+                if alive_guids:
+                    self._configured_page_guids &= alive_guids
+            except (AttributeError, RuntimeError):
+                # Context enumeration can race with teardown (RuntimeError from
+                # the Playwright loop, AttributeError when ``context`` is torn
+                # down mid-call). The cap is a best-effort hygiene measure.
+                logger.debug("playwright_driver: guid-cache prune skipped during teardown")
         return False
 
     def _load_capture_settings(self):
@@ -299,13 +361,212 @@ class PlaywrightDriver(QThread):
         )
 
     def _cleanup_temporary_profile_dir(self):
-        """Delete isolated fallback profiles created for this session."""
+        """Delete isolated fallback profiles created for this session.
+
+        R21.AC1 + R21.AC4:
+        1. Ensure the browser context/process is torn down before ``rmtree``
+           to avoid Windows file-in-use errors (Chromium keeps Singleton
+           sockets/locks open until the driver exits).
+        2. Wait up to ``_BROWSER_PROC_WAIT_TIMEOUT`` seconds, escalating to
+           ``kill_process_tree`` on timeout.
+        3. Run ``shutil.rmtree`` with ``ignore_errors=False`` so we can log
+           ``profile_cleanup_denied`` on ``PermissionError`` and keep going
+           instead of crashing the main flow.
+        """
         if not self._temporary_profile_dir:
             return
+
+        profile_dir = self._temporary_profile_dir
         try:
-            shutil.rmtree(self._temporary_profile_dir, ignore_errors=True)
+            self._shutdown_browser_for_cleanup()
+            try:
+                shutil.rmtree(profile_dir, ignore_errors=False)
+            except PermissionError as exc:
+                logger.warning(
+                    f"[PWR-CLEAN] 临时 profile 清理无权限: {profile_dir} ({exc})",
+                    event="profile_cleanup_denied",
+                    stage="cleanup_temporary_profile_dir",
+                    error_type=type(exc).__name__,
+                    path=str(profile_dir),
+                )
+            except FileNotFoundError:
+                # Already gone (possibly cleaned by stale scan). Not an error.
+                pass
+            except OSError as exc:
+                logger.warning(
+                    f"[PWR-CLEAN] 临时 profile 清理失败: {profile_dir} ({exc})",
+                    event="profile_cleanup_failed",
+                    stage="cleanup_temporary_profile_dir",
+                    error_type=type(exc).__name__,
+                    path=str(profile_dir),
+                )
         finally:
             self._temporary_profile_dir = None
+
+    def _shutdown_browser_for_cleanup(self) -> None:
+        """Best-effort browser shutdown + process wait prior to rmtree."""
+        browser = self.browser
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.debug(
+                    f"[PWR-CLEAN] browser.close() 失败: {exc}",
+                    event="playwright_browser_close_error",
+                    stage="cleanup_temporary_profile_dir",
+                    error_type=type(exc).__name__,
+                )
+
+        # Playwright's ``browser`` attribute is ``None`` under persistent
+        # context mode — the driver child process is owned by the
+        # ``_browser_type`` connection. Look up the backing Popen handle
+        # across known attribute names so we can wait and escalate.
+        proc_handle = self._resolve_browser_process_handle()
+        if proc_handle is None:
+            return
+
+        pid = getattr(proc_handle, "pid", None)
+        try:
+            proc_handle.wait(timeout=_BROWSER_PROC_WAIT_TIMEOUT)
+        except Exception as exc:
+            # ``TimeoutExpired`` is the expected escalation trigger; any
+            # other failure likewise means we cannot confirm exit, so
+            # escalate too rather than leaking a child into rmtree.
+            logger.warning(
+                f"[PWR-CLEAN] 浏览器进程未在 {_BROWSER_PROC_WAIT_TIMEOUT}s 内退出, "
+                f"升级到 kill_process_tree pid={pid}: {exc}",
+                event="playwright_browser_wait_timeout",
+                stage="cleanup_temporary_profile_dir",
+                error_type=type(exc).__name__,
+                pid=pid,
+            )
+            if isinstance(pid, int) and pid > 0:
+                try:
+                    kill_process_tree(pid)
+                except Exception as kill_exc:  # pragma: no cover - defensive
+                    logger.debug(
+                        f"[PWR-CLEAN] kill_process_tree 失败 pid={pid}: {kill_exc}",
+                        event="playwright_kill_process_tree_failed",
+                        stage="cleanup_temporary_profile_dir",
+                        error_type=type(kill_exc).__name__,
+                    )
+
+    def _resolve_browser_process_handle(self):
+        """Return the ``subprocess.Popen``-like handle behind Playwright."""
+        # Public attribute first (rare), then known internal locations.
+        candidates = (
+            getattr(self, "_browser_proc", None),
+            getattr(self.browser, "_process", None) if self.browser is not None else None,
+        )
+        if self.playwright is not None:
+            try:
+                chromium = getattr(self.playwright, "chromium", None)
+                impl = getattr(chromium, "_impl_obj", None) if chromium is not None else None
+                conn = getattr(impl, "_connection", None) if impl is not None else None
+                transport = getattr(conn, "_transport", None) if conn is not None else None
+                proc = getattr(transport, "_proc", None) if transport is not None else None
+                candidates = candidates + (proc,)
+            except AttributeError:
+                # Playwright internals moved between releases; fall through
+                # to the other candidate slots silently.
+                logger.debug("playwright_driver: chromium impl handle unavailable")
+        for candidate in candidates:
+            if candidate is not None and hasattr(candidate, "wait"):
+                return candidate
+        return None
+
+    def _cleanup_stale_profile_dirs(self) -> None:
+        """Scan the fallback profile root for ``profile_*`` / ``temp_profile_*``
+        directories older than 24h and ``rmtree`` them (R21.AC2).
+
+        Failures are logged as ``profile_cleanup_denied`` and do not abort
+        startup (R21.AC4).
+        """
+        try:
+            profile_root = get_temp_dir() / "playwright_profiles"
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                f"[PWR-CLEAN] 解析 profile 根目录失败: {exc}",
+                event="playwright_profile_root_resolve_failed",
+                stage="cleanup_stale_profile_dirs",
+                error_type=type(exc).__name__,
+            )
+            return
+
+        if not profile_root.exists():
+            return
+
+        now = time.time()
+        cutoff = now - _STALE_PROFILE_MAX_AGE_SECONDS
+        removed = 0
+        scanned = 0
+        try:
+            entries = list(profile_root.iterdir())
+        except PermissionError as exc:
+            logger.warning(
+                f"[PWR-CLEAN] 无权限列出 profile 根目录: {profile_root} ({exc})",
+                event="profile_cleanup_denied",
+                stage="cleanup_stale_profile_dirs",
+                error_type=type(exc).__name__,
+                path=str(profile_root),
+            )
+            return
+        except OSError as exc:
+            logger.debug(
+                f"[PWR-CLEAN] 列出 profile 根目录失败: {profile_root} ({exc})",
+                event="playwright_profile_scan_failed",
+                stage="cleanup_stale_profile_dirs",
+                error_type=type(exc).__name__,
+            )
+            return
+
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            if not entry.name.startswith(_STALE_PROFILE_PREFIXES):
+                continue
+            scanned += 1
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError as exc:
+                logger.debug(
+                    f"[PWR-CLEAN] 读取 mtime 失败: {entry} ({exc})",
+                    event="playwright_profile_stat_failed",
+                    stage="cleanup_stale_profile_dirs",
+                    error_type=type(exc).__name__,
+                )
+                continue
+            if mtime >= cutoff:
+                continue
+            try:
+                shutil.rmtree(entry, ignore_errors=False)
+                removed += 1
+            except PermissionError as exc:
+                logger.warning(
+                    f"[PWR-CLEAN] 清理旧 profile 无权限: {entry} ({exc})",
+                    event="profile_cleanup_denied",
+                    stage="cleanup_stale_profile_dirs",
+                    error_type=type(exc).__name__,
+                    path=str(entry),
+                )
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.debug(
+                    f"[PWR-CLEAN] 清理旧 profile 失败: {entry} ({exc})",
+                    event="playwright_profile_rm_failed",
+                    stage="cleanup_stale_profile_dirs",
+                    error_type=type(exc).__name__,
+                )
+
+        if scanned or removed:
+            logger.info(
+                f"[PWR-CLEAN] 旧 profile 清理: 扫描 {scanned} 个, 删除 {removed} 个",
+                event="playwright_profile_stale_cleanup",
+                stage="cleanup_stale_profile_dirs",
+                scanned=scanned,
+                removed=removed,
+            )
     
     def _setup_page(self, page):
         """配置页面拦截与脚本"""

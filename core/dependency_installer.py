@@ -723,8 +723,14 @@ class DependencyInstaller:
     def _cleanup_file(path: Path) -> None:
         try:
             path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except OSError as exc:
+            # Temp file may be locked by AV or already gone on a retry; log
+            # without the path (it is ephemeral and safe, but the redact
+            # discipline stays consistent across cleanup paths).
+            logger.debug(
+                "dependency_installer: temp cleanup skipped (%s)",
+                type(exc).__name__,
+            )
 
     @staticmethod
     def _guess_download_suffix(url: str, fallback: str) -> str:

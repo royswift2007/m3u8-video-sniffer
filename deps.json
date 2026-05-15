@@ -9,6 +9,28 @@
         "type": "file",
         "url": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
         "timeout": 300
+      },
+      "version": {
+        "command": [
+          "{path}",
+          "--version"
+        ],
+        "regex": "(?P<version>\\d{4}\\.\\d{2}\\.\\d{2})",
+        "normalize": "strip_v",
+        "timeout": 15
+      },
+      "update": {
+        "enabled": true,
+        "release_source": "github_latest",
+        "repo": "yt-dlp/yt-dlp",
+        "asset_pattern": "yt-dlp.exe",
+        "version_source": "tag_name",
+        "version_regex": "(?P<version>\\d{4}\\.\\d{2}\\.\\d{2})",
+        "install_strategy": "replace_file",
+        "requires_process_free": true,
+        "checksum": {
+          "sha256_url": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
+        }
       }
     },
     {
@@ -22,6 +44,28 @@
         "asset_pattern": "*win-x64*.zip",
         "member": "N_m3u8DL-RE.exe",
         "timeout": 300
+      },
+      "version": {
+        "command": [
+          "{path}",
+          "--version"
+        ],
+        "regex": "(?i)(?:N_m3u8DL-RE\\s*)?(?P<version>v?\\d+(?:\\.\\d+)+(?:[-\\w.]*)?)",
+        "normalize": "strip_v",
+        "timeout": 15
+      },
+      "update": {
+        "enabled": true,
+        "release_source": "github_latest",
+        "repo": "nilaoda/N_m3u8DL-RE",
+        "asset_pattern": "*win-x64*.zip",
+        "version_source": "tag_name",
+        "version_regex": "(?P<version>v?\\d+(?:\\.\\d+)+(?:[-\\w.]*)?)",
+        "install_strategy": "replace_zip_member",
+        "requires_process_free": true,
+        "checksum": {
+          "comment": "Upstream ships no sha256 sidecar; verified via TOFU: the first successful update pins the zip digest under ~/.m3u8d/component_pins.json and subsequent updates compare against that pin. Asset URL must live on github.com."
+        }
       }
     },
     {
@@ -34,6 +78,29 @@
         "url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         "member": "ffmpeg.exe",
         "timeout": 600
+      },
+      "version": {
+        "command": [
+          "{path}",
+          "-version"
+        ],
+        "regex": "ffmpeg version\\s+(?P<version>\\S+)",
+        "normalize": "strip_v",
+        "timeout": 15
+      },
+      "update": {
+        "enabled": true,
+        "release_source": "direct",
+        "latest_url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        "version_url": "https://www.gyan.dev/ffmpeg/builds/release-version",
+        "asset_pattern": "ffmpeg.exe",
+        "version_source": "url",
+        "version_regex": null,
+        "install_strategy": "replace_zip_member",
+        "requires_process_free": true,
+        "checksum": {
+          "sha256_url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256"
+        }
       }
     }
   ],
@@ -49,6 +116,29 @@
         "asset_pattern": "*win-64bit*.zip",
         "member": "aria2c.exe",
         "timeout": 300
+      },
+      "version": {
+        "command": [
+          "{path}",
+          "--version"
+        ],
+        "regex": "aria2 version\\s+(?P<version>\\S+)",
+        "normalize": "strip_v",
+        "timeout": 15
+      },
+      "update": {
+        "enabled": true,
+        "release_source": "github_latest",
+        "repo": "aria2/aria2",
+        "asset_pattern": "*win-64bit*.zip",
+        "version_source": "tag_name",
+        "version_regex": "(?P<version>\\d+(?:\\.\\d+)+)",
+        "install_strategy": "replace_zip_member",
+        "requires_process_free": true,
+        "checksum": {
+          "sha256": "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
+          "comment": "aria2 1.37.0 win-64bit-build1.zip; upstream has not released since 2022-09-02 so a static pin is appropriate. Recompute if a new aria2 release ever ships."
+        }
       }
     },
     {
@@ -62,6 +152,30 @@
         "asset_pattern": "streamlink-*-x86_64.zip",
         "member": "streamlink.exe",
         "timeout": 600
+      },
+      "version": {
+        "command": [
+          "{path}",
+          "--version"
+        ],
+        "regex": "streamlink\\s+(?P<version>\\S+)",
+        "normalize": "strip_v",
+        "timeout": 30,
+        "post_install_required": false
+      },
+      "update": {
+        "enabled": true,
+        "release_source": "github_latest",
+        "repo": "streamlink/windows-builds",
+        "asset_pattern": "streamlink-*-x86_64.zip",
+        "version_source": "tag_name",
+        "version_regex": "(?P<version>\\d+(?:\\.\\d+)+)",
+        "install_strategy": "replace_zip_member",
+        "requires_process_free": true,
+        "post_install_version_required": false,
+        "checksum": {
+          "comment": "Upstream ships no sha256 sidecar; verified via TOFU: the first successful update pins the zip digest under ~/.m3u8d/component_pins.json and subsequent updates compare against that pin. Asset URL must live on github.com."
+        }
       }
     }
   ],

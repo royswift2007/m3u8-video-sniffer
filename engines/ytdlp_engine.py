@@ -1,13 +1,149 @@
 """
 yt-dlp engine wrapper for universal video downloads
 """
+import os
 import subprocess
 import re
-import time
 from pathlib import Path
-from engines.base_engine import BaseEngine
+from typing import Mapping, Optional
+from urllib.parse import urlparse
+
+from engines.base_engine import BaseEngine, EngineResult
 from core.task_model import DownloadTask
 from utils.logger import logger
+
+
+# ---------------------------------------------------------------------------
+# cookies 域名 → cookies 文件主域 的映射（Requirement 36.1 / 36.2 / 36.3）
+#
+# - 精确键(如 ``www.youtube.com``)用于命中特定主机；
+# - 通配键(``*.youtube.com``)用于匹配该主域下未显式列出的任意子域,
+#   与 Requirement 36.2 "可扩展至 *.youtube.com / *.bilibili.com, 配置化"
+#   保持一致。
+#
+# 该常量暴露为模块级,后续可由配置文件或测试通过 ``override_map`` 覆盖。
+# ---------------------------------------------------------------------------
+COOKIE_DOMAIN_MAP: dict[str, str] = {
+    # YouTube
+    'youtube.com': 'www.youtube.com',
+    'www.youtube.com': 'www.youtube.com',
+    'youtu.be': 'www.youtube.com',
+    'm.youtube.com': 'www.youtube.com',
+    '*.youtube.com': 'www.youtube.com',
+
+    # Bilibili
+    'bilibili.com': 'www.bilibili.com',
+    'www.bilibili.com': 'www.bilibili.com',
+    '*.bilibili.com': 'www.bilibili.com',
+
+    # TikTok
+    'tiktok.com': 'www.tiktok.com',
+    'www.tiktok.com': 'www.tiktok.com',
+    '*.tiktok.com': 'www.tiktok.com',
+
+    # Twitter / X
+    'twitter.com': 'www.x.com',
+    'x.com': 'www.x.com',
+    'www.twitter.com': 'www.x.com',
+    'www.x.com': 'www.x.com',
+    '*.twitter.com': 'www.x.com',
+    '*.x.com': 'www.x.com',
+
+    # Instagram
+    'instagram.com': 'www.instagram.com',
+    'www.instagram.com': 'www.instagram.com',
+    '*.instagram.com': 'www.instagram.com',
+}
+
+
+def _normalize_host(url: str) -> str:
+    """从 URL 中解析出 host（小写、去端口）。失败返回空串。"""
+    try:
+        netloc = urlparse(url).netloc.lower()
+    except Exception as e:  # pragma: no cover - urlparse extremely rarely raises
+        logger.debug(f"[yt-dlp] URL 解析失败: url={url} error={e}")
+        return ""
+    if not netloc:
+        return ""
+    # 去掉用户信息(user:pass@)与端口
+    if '@' in netloc:
+        netloc = netloc.rsplit('@', 1)[1]
+    if ':' in netloc:
+        netloc = netloc.split(':', 1)[0]
+    return netloc
+
+
+def _lookup_target_domain(
+    host: str,
+    mapping: Mapping[str, str],
+) -> Optional[str]:
+    """按 Requirement 36 的规则在映射中查找目标 cookie 主域。
+
+    规则:
+      1. 精确匹配优先(host 直接命中映射键)。
+      2. 否则按 ``.`` 边界切分 host, 从左向右依次剥离前缀,
+         得到逐步缩短的后缀;对每个后缀依次检查:
+           a. ``<suffix>`` 精确键
+           b. ``*.<suffix>`` 通配键
+         任一命中即返回对应主域。
+      3. 后缀最短保留 2 段(避免匹配到单一 TLD 如 ``com``)。
+    """
+    if not host:
+        return None
+
+    # 1. 精确匹配
+    if host in mapping:
+        return mapping[host]
+    # 同一 host 同时接受 *.host 写法的精确命中(罕见但配置上合法)
+    exact_wild = f"*.{host}"
+    if exact_wild in mapping:
+        return mapping[exact_wild]
+
+    # 2. 后缀匹配
+    parts = host.split('.')
+    # i 从 1 开始(剥离最左一段);suffix 最短保留 2 段
+    for i in range(1, len(parts) - 1):
+        suffix = '.'.join(parts[i:])
+        if suffix in mapping:
+            return mapping[suffix]
+        wild = f"*.{suffix}"
+        if wild in mapping:
+            return mapping[wild]
+    return None
+
+
+def resolve_cookie_file(
+    url: str,
+    *,
+    cookies_base_path: Optional[str] = None,
+    override_map: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """根据 URL 解析对应的 cookies 文件路径(Requirement 36)。
+
+    Args:
+        url: 目标视频页 URL。
+        cookies_base_path: 可选;cookies 目录。默认取
+            ``YtdlpEngine.get_cookies_base_path()``。
+        override_map: 可选;替换默认的 ``COOKIE_DOMAIN_MAP``。
+            便于配置化覆盖与测试注入(Requirement 36.2)。
+
+    Returns:
+        映射命中时返回 ``<base>/<target_domain>_cookies.txt``;
+        未命中返回 ``None``。注意返回的路径不保证文件存在 ——
+        调用方仍需用 ``os.path.exists`` 校验。
+    """
+    host = _normalize_host(url)
+    if not host:
+        return None
+
+    mapping = override_map if override_map is not None else COOKIE_DOMAIN_MAP
+    target = _lookup_target_domain(host, mapping)
+    if not target:
+        return None
+
+    base = cookies_base_path if cookies_base_path is not None \
+        else YtdlpEngine.get_cookies_base_path()
+    return os.path.join(base, f"{target}_cookies.txt")
 
 
 class YtdlpEngine(BaseEngine):
@@ -32,16 +168,8 @@ class YtdlpEngine(BaseEngine):
         elif stop_reason == "shutdown":
             task.error_message = "应用关闭"
 
-    def _terminate_process_if_running(self, task: DownloadTask):
-        """在检测到停止请求时尽快终止当前 yt-dlp 进程。"""
-        process = getattr(task, "process", None)
-        if not process:
-            return
-        try:
-            if process.poll() is None:
-                process.kill()
-        except Exception as e:
-            logger.debug(f"[yt-dlp] 终止进程时忽略异常: {e}")
+    # Note: explicit process-kill helper removed in task 9.2 migration —
+    # ``BaseEngine.read_loop`` now owns the terminate→kill escalation.
     
     @classmethod
     def get_cookies_base_path(cls) -> str:
@@ -57,61 +185,21 @@ class YtdlpEngine(BaseEngine):
     
     @classmethod
     def get_cookies_file_for_url(cls, url: str) -> str:
-        """根据 URL 获取对应的 cookies 文件路径
-        
-        支持的网站及对应文件名：
+        """根据 URL 获取对应的 cookies 文件路径(Requirement 36)。
+
+        支持精确匹配与后缀/通配匹配,具体规则见
+        :func:`resolve_cookie_file`。若未命中任何映射键,
+        返回空串以保持历史调用方契约。
+
+        支持的网站(默认映射)：
         - YouTube: www.youtube.com_cookies.txt
         - Bilibili: www.bilibili.com_cookies.txt
         - TikTok: www.tiktok.com_cookies.txt
         - Twitter/X: www.x.com_cookies.txt
         - Instagram: www.instagram.com_cookies.txt
-        等等...
         """
-        import os
-        from urllib.parse import urlparse
-        
-        # 解析域名
-        try:
-            domain = urlparse(url).netloc.lower()
-        except Exception as e:
-            logger.debug(f"[yt-dlp] URL 解析失败: url={url} error={e}")
-            domain = ""
-        
-        # 域名映射（处理子域名和别名）
-        domain_map = {
-            'youtube.com': 'www.youtube.com',
-            'www.youtube.com': 'www.youtube.com',
-            'youtu.be': 'www.youtube.com',
-            'm.youtube.com': 'www.youtube.com',
-            
-            'bilibili.com': 'www.bilibili.com',
-            'www.bilibili.com': 'www.bilibili.com',
-            
-            'tiktok.com': 'www.tiktok.com',
-            'www.tiktok.com': 'www.tiktok.com',
-            
-            'twitter.com': 'www.x.com',
-            'x.com': 'www.x.com',
-            'www.twitter.com': 'www.x.com',
-            'www.x.com': 'www.x.com',
-            
-            'instagram.com': 'www.instagram.com',
-            'www.instagram.com': 'www.instagram.com',
-        }
-        
-        # 查找匹配的域名
-        target_domain = None
-        for key, value in domain_map.items():
-            if key in domain:
-                target_domain = value
-                break
-        
-        if not target_domain:
-            return ""
-        
-        # 构建文件路径
-        cookies_file = os.path.join(cls.get_cookies_base_path(), f"{target_domain}_cookies.txt")
-        return cookies_file
+        path = resolve_cookie_file(url, cookies_base_path=cls.get_cookies_base_path())
+        return path or ""
     
     @classmethod
     def get_youtube_cookies_file(cls) -> str:
@@ -232,8 +320,7 @@ class YtdlpEngine(BaseEngine):
             use_browser_cookies: None=只用任务自带cookies, 'chromium'=使用Chromium, 'firefox'=使用Firefox
         Returns: (success: bool, need_login: bool)
         """
-        process = None
-        output_lines = []
+        output_lines: list[str] = []
         try:
             if self._should_stop(task):
                 self._mark_stopped(task)
@@ -255,62 +342,42 @@ class YtdlpEngine(BaseEngine):
                 cookie_source += " (禁用证书校验重试)"
             
             logger.info(f"[yt-dlp] 开始下载: {task.filename}{cookie_source}")
-            logger.debug(f"命令: {' '.join(cmd)}")
-            
-            # 隐藏 CMD 窗口
-            creation_flags = 0
-            if hasattr(subprocess, 'CREATE_NO_WINDOW'):
-                creation_flags = subprocess.CREATE_NO_WINDOW
-            
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='ignore',
-                creationflags=creation_flags
-            )
-            
+            self.log_command(cmd)
+
+            # ``BaseEngine.spawn`` (task 29.1) owns the CREATE_NO_WINDOW /
+            # close_fds / byte-mode PIPE boilerplate. ``sensitive=False``
+            # suppresses spawn's own ``log_command`` call since we already
+            # emitted a redacted line above. ``read_loop`` drains stdout
+            # and stderr on separate pump threads (task 9.2), so the old
+            # ``stderr=STDOUT`` merge is no longer needed — ``_parse_line``
+            # accumulates every line for post-run login-keyword diagnosis
+            # regardless of tag.
+            process = self.spawn(cmd, sensitive=False)
+
             task.process = process
-            stdout = process.stdout
-            
-            while True:
-                if self._should_stop(task):
-                    self._mark_stopped(task)
-                    self._terminate_process_if_running(task)
-                    break
 
-                if stdout is None:
-                    break
+            # ``read_loop`` drives PIPE draining, stop-request handling, and
+            # the terminate→kill escalation. ``_parse_line`` accumulates
+            # output on the thread-local slot for post-run diagnostics.
+            self._tls.progress_callback = progress_callback
+            self._tls.output_lines = output_lines
+            try:
+                result: EngineResult = self.read_loop(process, task, self._parse_line)
+            finally:
+                self._tls.progress_callback = None
+                self._tls.output_lines = None
 
-                line = stdout.readline()
-                if line == "":
-                    if process.poll() is not None:
-                        break
-                    time.sleep(0.05)
-                    continue
-
-                line = line.strip()
-                if line:
-                    output_lines.append(line)
-                    logger.debug(f"[yt-dlp] {line}")
-                    progress_data = self.parse_progress(line)
-                    if progress_data['progress'] > 0 or progress_data['speed']:
-                        progress_callback(progress_data)
-            
-            if self._should_stop(task):
+            # Stop requests (paused / cancelled / removed / shutdown /
+            # engine_switch) are already reflected on ``task.stop_reason``;
+            # surface them as a non-login failure so callers don't escalate
+            # into browser-cookie retries.
+            if result.status in {"stopped", "switched", "paused"}:
                 self._mark_stopped(task)
-                self._terminate_process_if_running(task)
+                return False, False
 
-            returncode = process.poll()
-            if returncode is None:
-                if self._should_stop(task):
-                    self._mark_stopped(task)
-                    self._terminate_process_if_running(task)
-                returncode = process.wait()
-            success = returncode == 0 and not self._should_stop(task)
-            
+            returncode = result.returncode
+            success = result.status == "ok"
+
             # 检测是否需要登录
             need_login = False
             full_output = '\n'.join(output_lines).lower()
@@ -318,14 +385,7 @@ class YtdlpEngine(BaseEngine):
             if not success and any(kw in full_output for kw in login_keywords):
                 need_login = True
 
-            if self._should_stop(task):
-                self._mark_stopped(task)
-                return False, False
-
             if (not success) and (not allow_insecure_tls) and self._is_certificate_error(full_output):
-                if self._should_stop(task):
-                    self._mark_stopped(task)
-                    return False, False
                 logger.warning("[yt-dlp] 检测到证书校验失败，自动启用 --no-check-certificates 重试一次")
                 return self._do_download(
                     task,
@@ -356,9 +416,23 @@ class YtdlpEngine(BaseEngine):
             logger.error(f"[yt-dlp] 下载异常: {e}")
             task.error_message = str(e)
             return False, False
-        finally:
-            if self._should_stop(task):
-                self._terminate_process_if_running(task)
+
+    def _parse_line(self, stream_tag: str, text: str) -> None:
+        """``read_loop`` callback: accumulate output and push progress events."""
+        line = text.strip()
+        if not line:
+            return
+
+        output_lines = getattr(self._tls, "output_lines", None)
+        if output_lines is not None:
+            output_lines.append(line)
+
+        logger.debug(f"[yt-dlp] {line}")
+        progress_data = self.parse_progress(line)
+        if progress_data['progress'] > 0 or progress_data['speed']:
+            progress_callback = getattr(self._tls, "progress_callback", None)
+            if progress_callback is not None:
+                progress_callback(progress_data)
     
     def _build_command(
         self,
@@ -381,10 +455,25 @@ class YtdlpEngine(BaseEngine):
 
         if '#format=' in url:
             base_url, format_param = url.rsplit('#format=', 1)
-            if format_param.isdigit():
+            # Audit-finding Medium #5: yt-dlp accepts non-numeric format
+            # ids such as ``bestvideo+bestaudio``, ``137+140``, ``hls-720``.
+            # The previous ``isdigit()`` gate silently fell back to
+            # best-quality for every non-numeric selection the UI made.
+            # Widen to a conservative safe-character allowlist that
+            # covers real-world format ids while still refusing shell
+            # metacharacters (space, ``;``, ``&``, ``|``, ``$``, backticks,
+            # quotes, newlines) so the value stays safe to hand to the
+            # engine as a plain argv token.
+            if re.fullmatch(r"[A-Za-z0-9_.+:\-]+", format_param or ""):
                 url = base_url
                 format_id = format_param
                 logger.info(f"[yt-dlp] 使用指定格式: {format_id}")
+            else:
+                logger.warning(
+                    f"[yt-dlp] 忽略不安全的 #format= 取值,回退到默认选择",
+                    event="ytdlp_format_rejected",
+                    stage="format_parse",
+                )
         
         output_template = str(Path(task.save_dir) / f'{task.filename}.%(ext)s')
         
@@ -535,11 +624,12 @@ class YtdlpEngine(BaseEngine):
             cmd.extend(['--add-header', f'Cookie: {cookie}'])
         
         try:
-            # 隐藏 CMD 窗口
-            creation_flags = 0
-            if hasattr(subprocess, 'CREATE_NO_WINDOW'):
-                creation_flags = subprocess.CREATE_NO_WINDOW
-
+            # Probe-only path: yt-dlp ``-J`` dumps the full format metadata
+            # as a JSON blob we need synchronously, so we stay on
+            # ``subprocess.run`` rather than routing through
+            # ``BaseEngine.spawn`` + ``read_loop``. The single-line
+            # ``getattr`` keeps CREATE_NO_WINDOW attachment consistent
+            # with the other probe sites (task 29.2).
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -547,7 +637,7 @@ class YtdlpEngine(BaseEngine):
                 encoding='utf-8',
                 errors='ignore',
                 timeout=30,
-                creationflags=creation_flags
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             
             if result.returncode != 0:

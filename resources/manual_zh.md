@@ -1,4 +1,5 @@
 M3U8 Video Sniffer 详细使用手册（按当前程序实际代码整理）
+> 当前对应程序版本: v0.4.1 (M3U8D)
 
 # 首次运行前必看：运行环境与 Chrome 重要说明
 
@@ -105,13 +106,22 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     当前入口实际支持以下参数：
         --url
             外部传入的视频或页面 URL。
+            校验规则：仅接受 http / https 协议，长度上限 4096 字符；
+            会做内网 / 云元数据过滤（拒绝 127/10/172.16-31/192.168/169.254/::1/fc00::/fe80:: 以及 169.254.169.254 等云元数据地址）。
+            违规时程序以退出码 2 结束，不会启动 UI。
 
         --headers
             JSON 字符串，格式通常为：
             {"referer":"...","user-agent":"...","cookie":"..."}
+            校验规则：会经过与 CatCatch HTTP 相同的头部清洗——
+            名称只允许 `[A-Za-z0-9-]` 且长度 ≤64；值不得含 `\r \n \0`，长度 ≤4096；
+            仅保留 Referer / User-Agent / Origin / Cookie / Accept-Language 白名单内字段，其它字段会被静默丢弃。
 
         --filename
             传入资源的默认文件名或标题。
+            校验规则：会自动清洗 Windows 保留名（CON / PRN / AUX / NUL / COM1-9 / LPT1-9）、
+            ASCII 控制符、末尾 `.` 与空格；最终绝对路径字节长度限制在 240 以内；
+            完全为空时用 `media_<时间戳>` 兜底。
 
     实际执行逻辑：
         1. 先正常启动主界面。
@@ -141,7 +151,71 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     2. 资源列表
     3. 下载中心
 
-右上角还有一个“快速手册”入口，用于打开当前这份手册。
+右上角还有“组件管理”和“快速手册”两个入口：
+    - 组件管理：打开外部下载组件的状态与更新管理界面。
+    - 快速手册：打开当前这份手册。
+
+3.0 组件管理与自动更新说明
+    入口位置：
+        主窗口右上角新增“组件管理”入口，和“快速手册”位于同一区域。
+
+    可查看的信息：
+        组件管理界面会列出 yt-dlp、N_m3u8DL-RE、FFmpeg、aria2c、Streamlink，并显示每个组件的：
+            - 本地版本
+            - 最新版本
+            - 当前状态（例如已安装、缺失、可更新、检查失败等）
+            - 本地路径
+
+    常用操作：
+        - 刷新本地状态：重新扫描本机 bin 目录与可执行文件，更新本地版本、路径和缺失状态。
+        - 检查更新：联网读取远端发布信息，只检查最新版本和可更新状态，不会自动下载安装。
+        - 更新全部可更新：对当前检测到可更新的组件统一执行更新，执行前会要求确认。
+        - 单组件安装 / 更新 / 重试：针对某一个组件执行安装、更新或失败后的重试，适合只补齐缺失组件或只更新指定组件。
+
+    启动后的行为：
+        程序启动后只会做只读检查和右上角入口提示，用于提醒组件状态；不会在后台自动下载、安装或替换任何组件。
+
+    安装包与组件缺失处理：
+        使用安装包安装时，默认会下载必须组件（yt-dlp、N_m3u8DL-RE、FFmpeg）。aria2c、Streamlink 等建议组件需要在安装向导中勾选。
+        如果后续发现组件缺失、版本过旧或路径异常，可以进入“组件管理”执行安装 / 更新。
+
+    安全策略：
+        - 更新前会进行二次确认，避免误操作。
+        - 下载内容会先保存到独立的临时目录（staging），不会直接写入 bin 目录。
+        - 安装前会走一条完整的校验链：
+            · manifest 必须提供 sha256 或签名之一，两者都缺失时任务会以 `missing_checksum` 失败。
+            · 下载完成后按 manifest 中的 sha256 做逐字节比对，不一致则以 `checksum_mismatch` 失败并删除临时文件。
+            · 如果 manifest 带有 signature，Windows 上会通过 Authenticode / 预置公钥校验。
+            · 替换前会做磁盘空间预检（按需求量的 1.2 倍即预留 20% 余量），空间不足时以 `insufficient_disk` 失败且不会触碰 bin 目录。
+            · 替换前还会再次校验 staging 内产物的 sha256，不一致时以 `staging_tampered` 失败。
+        - 替换前会把旧文件另存为 `.bak`，保留到下一次启动；替换失败时会尝试用 `.bak` 回滚。任何失败路径都不会修改 bin 目录。
+        - 如果目标引擎文件正在被其他进程使用，任务会被标记为 `deferred_pending_restart`，下次启动程序时会自动重试。
+        - 更新组件时建议先暂停或结束正在运行的下载任务，避免 yt-dlp.exe、N_m3u8DL-RE.exe、ffmpeg.exe、aria2c.exe、streamlink.exe 等文件被占用导致替换失败。
+
+    sha256 来源分层（五个后端都能自动校验）：
+        不同后端的官方发布策略不同，程序按下列顺序依次尝试获取可比对的 sha256，保证"没有 sha256 就不敢装"的底线不被绕过：
+        - 静态固定值：`deps.json` 里以 `checksum.sha256` 写死一个期望摘要。aria2 1.37.0 就走这条路径（本地直接硬比对，速度最快、最严）。
+        - 动态 sidecar（`checksum.sha256_url`）：从同一个 Release 旁路文件里实时读取官方摘要。
+            · yt-dlp：读取 `SHA2-256SUMS` 这份官方摘要清单，再匹配本次要下载的 exe 文件名取出对应行。
+            · FFmpeg（gyan.dev 构建）：读取构建产物对应的 `.zip.sha256` 文件，作为 zip 的期望值；安装到 bin 后还会再按解压出来的 `ffmpeg.exe` 重新计算一次 sha256。
+        - 首次信任（TOFU）：N_m3u8DL-RE、streamlink 的官方 Release 目前不提供标准 sha256 sidecar，程序会在 HTTPS + 严格域名白名单（`github.com` / `objects.githubusercontent.com` / 对应的 PyPI CDN）条件下下载，首次成功安装后把实测摘要固定到 `~/.m3u8d/component_pins.json`；后续同一版本再更新时，如果新下载文件的 sha256 与该文件里记录的值不一致，会以 `pin_mismatch` 失败并回滚，不会静默覆盖。
+        - 任何一个后端在上述三条路径里都拿不到可比对的 sha256 时，会以 `missing_checksum` 直接失败、拒绝继续安装（诊断模式下可单独放宽并带审计日志，但默认不开放）。
+
+    下载进度与"看起来卡住"：
+        组件包体积差异很大（yt-dlp 约 12 MB，N_m3u8DL-RE 约 30 MB，FFmpeg essentials 构建约 130 MB），单次下载耗时从几秒到几分钟不等。为避免大包让界面看起来像"卡住"：
+        - 下载阶段会按"每推进 2% 或累计 1 MiB 取较粗的一档"回传进度，界面上的"下载中"状态会持续滚动更新，而不是一直停在固定文字。
+        - 单次 HTTPS 请求的总超时为 10 分钟（`network_timeout=600s`），跨此阈值才会判定为超时失败；在此之前没有新进度不代表失败，请先等待或观察网速。
+        - 如果长时间完全没有新进度且当前网速为 0，可以在组件管理里点"重试"或"取消"，失败路径不会写坏 bin 目录。
+
+    安装后版本复核（更宽松的版本比对）：
+        - 复制/替换到 bin 后，程序会调用目标引擎自带的 `--version`（或等效命令）读出实际版本字符串，再和 manifest / 远端声明的目标版本做比对，全部通过才认为"本次更新已完成"。
+        - 比对时使用"相容匹配"规则：先各自去掉大小写的 `v` 前缀和两端空白，任意一个字符串是另一个的前缀，且紧邻下一个字符是 `.` `-` `_` `+` 空格 或到达末尾，就算相容。
+            · 举例：目标 `8.1.1`，引擎实际输出 `8.1.1-essentials_build-www.gyan.dev`、`ffmpeg version 8.1.1 Copyright ...`、`v8.1.1` 等都会判定为相容，不会误报失败。
+            · 但 `8.1.1` 与 `8.1.10` 不相容（紧邻下一个字符是数字 `0`，不在分隔集合里），会以 `version_mismatch` 报错。
+        - 只要复核环节判定为 `version_mismatch`，就会立即用替换前保留的 `.bak` 回滚到旧版本，旧版本可立即继续使用。
+
+    显示提示：
+        如果本地路径、版本号或远端版本文本过长，界面可能只显示截断内容；将鼠标悬停在对应单元格上可查看完整内容。
 
 3.1 浏览器工作台页的组成
     顶部工具栏包含：
@@ -333,11 +407,11 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
 
     使用方法：
         1. 在搜索框输入关键词，可搜标题、tooltip 中的完整 URL、来源文本。
-        2. 通过“全部类型 / M3U8 / MPD / MP4 ...”缩小范围。
+        2. 通过"全部类型 / M3U8 / MPD / MP4 ..."缩小范围；类型列的显示规则是：m3u8 / mpd / mp4 / flv / mkv / webm / ts 等格式直接显示大写原名（`M3U8` / `MPD` / `MP4` / `FLV` / `MKV` / `WEBM` / `TS`），只有 `Unknown` / `Video Stream` / `Playlist` 这三个语义标签才会走界面语言翻译，因此下拉筛选能按字面精确匹配。
         3. 通过来源过滤定位某个页面来源。
         4. 通过 2160 / 1080 / 720 / 音频 等选项筛选清晰度。
 
-5.4 下载所选 / 移除所选 / 清空列表
+5.4 下载所选 / 移除所选 / 清空列表 / 清空临时文件
     下载所选：
         对当前选中的多行逐条执行下载逻辑。
 
@@ -346,6 +420,10 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
 
     清空列表：
         清空资源表格、去重缓存、page_url 映射和过滤条件。
+
+    清空临时文件：
+        独立入口（按钮或菜单项），只清空 `temp_dir` 下的下载中间产物（`.part` / `.tmp` / 残留分片等），
+        不再由添加任务的路径顺带执行，避免误删你正在分片下载的任务。建议在磁盘空间紧张时手动执行一次。
 
 5.5 M3U8 自动解析与变体展开
     当列表里加入一个主 m3u8 资源时，ResourcePanel 会自动启动后台线程 M3U8FetchThread：
@@ -377,6 +455,18 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
 
         C. 其他资源
             - 直接创建下载任务并入队。
+
+    入队结果反馈（点击下载后的四种结果）：
+        无论走 A / B / C 哪条分支，最终都统一经由下载管理器的 `add_resource` 做入队，
+        界面会根据返回值展示以下四种明确结果之一，避免"点了没反应"：
+            - `queued`：新任务已正常入队，下载队列里会出现对应行，可在下载中心继续跟踪。
+            - `merged`：检测到已存在相同任务（按 url / 引擎 / 保存目录 / 标题生成的幂等键命中），
+                本次点击被合并到已有任务，不会再在队列里堆出第二条相同任务；状态栏提示"已合并到已有任务"。
+            - `needs_confirmation`：入队前的磁盘预检失败（默认要求目标盘可用空间 ≥ 预估大小 × 1.2），
+                程序会弹窗让你确认"继续下载 / 取消"，选择继续会以 `disk_precheck=bypassed` 记录审计；
+                不做选择时任务不会入队，避免写盘到半途失败。
+            - `failed`：URL / headers 经过与协议处理器相同的清洗后仍被拒绝（内网 / 云元数据地址、非 http(s) 协议、
+                URL 超长、headers 超长或含非法字符等），状态栏会提示失败原因，不会进入下载队列。
 
 5.7 yt-dlp 格式选择对话框怎么用
     实现方式：
@@ -459,18 +549,24 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 调大：多个任务可同时下载，但更占带宽和磁盘资源。
         - 调小：更稳定，适合容易 403 或网络不稳的站点。
 
+    动态调整：
+        把并发从 N 调到 M（M<N）时，程序会给最近启动的 N-M 个 worker 发出软退出信号，
+        它们会在当前任务完成后自然退出；若 30 秒内仍未退出，会记录一条 `worker_exit_timeout` 告警，
+        但不会强杀已经开始下载的任务。调大并发时会立刻增派新 worker；
+        界面上的 `active_workers` 始终反映真实存活数量。
+
 6.5 限速
     对应配置项：
         speed_limit
 
     界面含义：
-        单位是 MB/s，0 表示不限速。
+        单位统一为 MB/s，0 表示不限速。
 
     实际生效方式：
-        - N_m3u8DL-RE：会转换成 --max-speed 参数。
-        - yt-dlp：会使用 --limit-rate。
-        - Aria2：会使用 --max-download-limit。
-        - Streamlink 当前没有按此参数做专门限速处理。
+        - N_m3u8DL-RE：会转为 `--max-download-speed {N}MB`。
+        - Aria2：会转为 `--max-overall-download-limit={N}M`。
+        - yt-dlp：会转为 `--limit-rate`（按 MB/s 展开）。
+        - Streamlink：当前不按此参数做专门的下载限速。
 
     使用建议：
         - 遇到网络波动、掉线、证书/网关问题时，可适度限速。
@@ -554,6 +650,16 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         任务不仅保存最终下载地址，还保存来源清晰度、主播放列表地址、失败状态等上下文。
 
 7.2 引擎选择优先级
+    综合判定顺序（优先级从高到低）：
+        1. 用户在 UI 中手动指定的引擎（最高优先）。
+        2. 扩展名判定（判断前会先剥离 URL 上的 query string）。
+        3. HEAD 请求 MIME 探测（2 秒超时，受内网 / 云元数据过滤保护；
+           探测失败时回退到扩展名判定，并记录 `engine_select=fallback`）。
+        4. 直播平台名单命中（`LIVE_PLATFORMS`）。
+        5. 兜底使用 yt-dlp。
+
+    判定规则表（扩展名 + 直播平台）外置在 `resources/engine_rules.json`，可直接编辑，不需要改动代码。
+
     自动选择顺序当前为：
         N_m3u8DL-RE -> Streamlink -> Aria2 -> yt-dlp
 
@@ -568,9 +674,14 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         DownloadManager 使用 Queue + 多个 worker 线程。
 
     流程：
-        1. add_task() 把任务状态设为 waiting。
-        2. 根据当前设置和用户偏好选出首选引擎。
-        3. worker 线程按并发上限取任务执行。
+        1. 幂等预检：以 `sha1(url|engine|out_dir|title)` 为键查重，若已有同键任务则把本次请求合并到已有任务
+           （返回 `merged`），不会因反复右键"重新下载"而在队列里堆出多条相同任务。
+        2. 磁盘预检：从 manifest 读取估算大小（拿不到按 500 MB 计），与目标目录所在磁盘的可用空间比对，
+           不足时以 `needs_confirmation=insufficient_disk` 提示由你选择继续或取消；
+           选择"忽略预检"继续会记录 `disk_precheck=bypassed`。
+        3. add_task() 把任务状态设为 waiting。
+        4. 根据当前设置和用户偏好选出首选引擎。
+        5. worker 线程按并发上限取任务执行。
 
 7.4 HLS 预探测
     对应功能开关：
@@ -619,6 +730,12 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         6. timeout 类失败会按 backoff_seconds 做递增等待。
 
 7.7 任务暂停、继续、取消、删除
+    停止响应时间：
+        点击"暂停 / 取消"后，所有引擎（N_m3u8DL-RE / yt-dlp / Streamlink / Aria2）会在 500 ms 内跳出读循环并调用 terminate()；
+        若 1.5 秒内仍未退出则递归 kill，典型全链路响应时间不超过 2 秒。
+        大文件 FFmpeg 合并过程中取消时会清理 `.part` / `.tmp` 等中间产物，
+        保留已经完成的上一步产物（例如分片已下完但合并未完成时，分片会被保留，便于下一次恢复）。
+
     暂停：
         - 标记 stop_requested=True
         - stop_reason=paused
@@ -689,7 +806,22 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     Cookies 实际使用方式：
         - 程序会根据 URL 推断 cookies 文件名，例如 youtube 对应 cookies/www.youtube.com_cookies.txt。
         - 若该文件存在，会优先使用。
+        - 精确匹配失败时，会按 `.` 边界做子域后缀回退：`music.youtube.com` 会先试 `music.youtube.com_cookies.txt`，
+          不存在则回退到 `youtube.com_cookies.txt`，再到 `com_cookies.txt`，直到命中或走完。
         - 没有时会尝试 Firefox cookies 回退。
+
+    控制台编码：
+        Windows 下 yt-dlp 的 stdout 按 utf-8（errors='replace'）→ mbcs（系统 ANSI code page，通常 CP936）→ latin-1 三级兜底解码；
+        实际用到 mbcs / latin-1 时会在日志里带上 `decode=mbcs` / `decode=lossy` 标记，避免静默丢字符。
+
+    format_id 字符集（支持非数字格式 ID）：
+        - 程序把用户 / 格式对话框选出的 `format_id` 传给 yt-dlp 前，会先按字符白名单做严格校验：允许 `[A-Za-z0-9_.+:\-]+`。
+        - 下列在 YouTube / B 站等站点上真实存在的格式 ID 都会被放行，不需要降级为"最佳质量"：
+            · 纯数字：`137`、`140`、`399`。
+            · 带加号的音视频组合：`137+140`、`bestvideo+bestaudio`、`bestvideo[height<=1080]+bestaudio/best`。
+            · HLS / DASH 前缀：`hls-720`、`dash-480`、`http-720p`、`avc1_4d401f`。
+            · 冒号 / 下划线 / 点：`ec-3_audio`、`video:1080p`、`audio.original`。
+        - 任何包含空格、换行、分号、管道、反引号、`$()`、`&`、`<>` 等 shell 元字符的字符串都会被拒绝并以 `invalid_format_id` 失败，不会被拼到命令行里；因此即使对话框被第三方篡改，也不会变成命令注入入口。
 
 8.3 Streamlink
     适合：
@@ -700,6 +832,8 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 输出通常保存为 .ts。
         - 没有精确总进度时，会显示已写入大小和速度。
         - 失败时会做简易原因诊断，如 401/403/超时/地理限制等。
+        - Cookie 会按 `;` 自动拆分：`a=1; b=2` 会拆成 `--http-cookie "a=1"` 与 `--http-cookie "b=2"` 两组参数，
+          值会经过 URL 转义；空白 name 或不含 `=` 的条目会被丢弃。
 
 8.4 Aria2
     适合：
@@ -724,6 +858,10 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     说明：
         它现在更像“已接入的后处理能力”，并非主界面高频入口功能。
 
+    合并中取消：
+        大文件合并过程采用可取消的读循环；取消后会清理 `.part` / `.tmp` 等中间产物，
+        保留已经完成的上一步产物（例如分片已下完但合并未完成时，分片会被保留，便于下一次恢复）。
+
 
 ================================================================================
 9. 日志、历史记录、通知
@@ -744,6 +882,15 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     使用方法：
         - 当你觉得“点了没反应”时，先看这里。
         - 当下载失败时，先看这里的关键报错，再去日志文件夹查看完整日志。
+
+    默认级别与调试开关：
+        文件级日志默认为 INFO；需要抓 DEBUG 请设环境变量 `M3U8D_LOG_DEBUG=1` 后重启程序。
+        命令行与 URL 中的敏感头（Cookie / Set-Cookie / Authorization / Proxy-Authorization / X-Session-Token /
+        User-Agent / Referer / Origin）以及 URL 查询参数里的 `token` / `sign` / `signature` / `auth` 在日志写盘前
+        会被替换为 `<redacted>`，不会以明文落盘。
+        排障需要明文时可设环境变量 `SECURITY_DEBUG=1` 启用独立的 `debug.sensitive.log`（默认关闭，调试完务必关闭）。
+        日志按日期自动滚动，跨零点会新建当天文件；总容量超限会触发节流轮转（每 1000 条或 5 秒检查一次），
+        即使开启高频 DEBUG 也不会拖慢下载。
 
 9.1.1 常见日志级别怎么看
     INFO：表示流程正在正常推进，或某一步已经成功完成。
@@ -795,6 +942,14 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - completed_at
         - cookie_file（如果当时存在）
 
+    写入历史前的敏感头字段清理：
+        `history.json` 在落盘前会先对 `headers` 做一次白名单外敏感字段剥离，避免把一次性令牌 / 凭证长期留在用户目录：
+            - 下列键（不区分大小写）会被整列删除，不会出现在 `history.json` 里：
+              `Cookie` / `Set-Cookie` / `Authorization` / `Proxy-Authorization` / `X-Session-Token` /
+              `X-Auth-Token` / `Token` / `Api-Key` / `X-Api-Key`。
+            - `Referer` / `User-Agent` / `Origin` / `Accept-Language` 等下载复用所需的字段会原样保留，便于"右键重新下载"仍然能带着正确上下文起步。
+            - 这个剥离只发生在写入 `history.json` 前，运行中任务仍然持有完整 headers；因此清理后再点"重新下载"拿到的仍是剥离过的字段，如遇到鉴权失败，请按需要在站点规则或外部传入 headers 里重新补回 Cookie / Authorization。
+
     右键菜单支持：
         - 重新下载
         - 打开文件位置
@@ -817,9 +972,46 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
 10.1 CatCatch HTTP 服务
     启动时主窗口会创建 CatCatchServer，并自动启动本地 HTTP 服务。
 
+    监听地址：
+        强制绑定 `127.0.0.1`，不会绑 `0.0.0.0` / `::`。
+
     端口策略：
         - 优先 9527
         - 若被占用，会尝试 9528 ~ 9539
+        - 全部候选端口都失败时，会记录 `bind_timeout` 或 `port_exhausted`，不会让 UI 卡住。
+
+    认证与跨站防护：
+        - 启动时会随机生成一次性会话令牌（token）并写入 `~/.m3u8d/session.token`
+          （POSIX 下权限为 0600 / Windows 下使用 owner-only DACL），供可信客户端读取。
+        - 所有请求的 `Origin` / `Referer` 必须在白名单内；默认白名单为
+          `http://127.0.0.1` / `http://localhost` / `https://127.0.0.1` / `https://localhost` 四种 loopback 变体。
+        - `POST /download` 另外要求 `X-Session-Token` 头与当前会话令牌一致：缺失或错误返回 401；
+          `Origin` 不在白名单时返回 403，且不会回显任何 `Access-Control-Allow-*` 头。
+        - `Access-Control-Allow-Origin` 只会回显具体的白名单 Origin，不会是 `*`。
+
+    URL 防护（SSRF 过滤）：
+        - `POST /download` 接受到的 `url` 会先走一次公网地址校验（`ensure_public()`），下列目标会被直接以 **400 Bad Request** 拒绝，不会进入下载队列：
+            · 回环地址：`127.0.0.0/8`、`::1`。
+            · 私网地址：`10/8`、`172.16/12`、`192.168/16`、`fc00::/7`。
+            · 链路本地：`169.254/16`、`fe80::/10`。
+            · 云元数据：`169.254.169.254`（IMDSv1/v2 入口）等常见云内网端点。
+            · 非 `http` / `https` 协议、URL 超长（>4096）、或无法解析为 IP 的域名（查询失败时也视为不可信）。
+        - 这条过滤和 `main.py --url` / 协议处理器走的是同一段清洗代码，因此从浏览器扩展 / 协议 / 命令行三条入口传入的 URL 防护口径一致。
+
+    内部标记字段保护（不接受外部 `_` 前缀头）：
+        - 程序内部会把一次性提示信息（例如"这次任务使用哪个 cookies 文件"）以 `_cookie_file` 这种下划线前缀键临时挂在 headers 字典上，仅供引擎侧使用。
+        - `POST /download` 的 `headers` 字段在进入转发前，会把所有以 `_` 开头的键整列丢弃，不会被外部调用方利用"看起来像内部字段"的键绕过白名单或把任意本地路径注入到引擎命令行。协议处理器 `m3u8dl://` 的 JSON 载荷同样走这条剥离路径。
+        - 因此浏览器扩展、外部脚本、协议处理器都无法通过 JSON 里写一个 `_cookie_file: C:\... ` 来让程序去读任意文件；真正的 cookie 文件路径只能由程序内部按 URL 推断得到。
+
+    转发到引擎的 headers 清洗：
+        - 名称只允许 `[A-Za-z0-9-]` 且长度 ≤64；值不得含 `\r \n \0` 且长度 ≤4096。
+        - 仅允许转发白名单字段：Referer / User-Agent / Origin / Cookie / Accept-Language，其他字段会被静默丢弃。
+        - 转发到引擎命令行时始终使用参数化数组，绝不字符串拼接。
+
+    请求大小限制：
+        `POST /download` 的请求体上限为 **64 KiB**。超过上限时服务端直接返回 **413 Request Entity Too Large**，
+        并在日志里记录 `catcatch_body_too_large` 事件；浏览器扩展正常载荷（URL + headers + filename，一般只有几 KiB）
+        相对这个上限有充足余量，不会误伤。
 
     接口：
         GET /
@@ -829,7 +1021,7 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
             返回运行状态。
 
         GET /download?url=...&name=...
-            简单 GET 方式添加任务。
+            该 GET 入口已改为返回 **405 Method Not Allowed**，不再触发任何下载动作。原因是只读 GET 没有会话令牌保护，为避免绕过认证，程序把下载请求统一收敛到 `POST /download` + `X-Session-Token` 这条认证路径。外部调用方请改用 POST；`GET /` 与 `GET /status` 两个只读状态接口仍然可用，无需认证。
 
         POST /download
             可传 JSON 或 form。
@@ -851,9 +1043,21 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
 
     实际执行流程：
         1. 解析传入协议内容。
-        2. 先尝试把任务 POST 到正在运行的主程序。
-        3. 若本地程序未运行，则启动 main.py 并传入 --url / --headers / --filename。
-        4. 再次尝试投递给 GUI 程序。
+        2. 读取 `~/.m3u8d/session.token` 作为 `X-Session-Token`，并携带 `Origin: http://127.0.0.1`，
+           向候选端口 9527..9539 逐一发起 `POST /download`；任一端口返回 2xx 即视为握手成功，
+           不会再启动新的主程序实例。
+        3. 全部候选端口都握手失败（主程序确实未在运行 / 令牌文件缺失 / 令牌已失效）时，才启动 `main.py`
+           并传入 `--url` / `--headers` / `--filename`。
+        4. 新进程起来后会在 12 秒内轮询 send_to_app，把链接送进新实例的资源列表。
+
+    日志脱敏：
+        协议处理器日志 `logs/protocol_handler.log` 不会以明文记录令牌，只保留
+        `token_loaded=<bool>` / `token_len=<int>` / `status_code=<int>` / `auth_ok=<bool>` 等脱敏元信息。
+
+    紧急回滚：
+        如果某些环境暂时不适用握手（例如令牌文件被安全软件隔离但主程序仍在运行），可以把环境变量
+        `M3U8D_HANDOFF_LEGACY=1` 设上，暂时退化为旧行为（不读令牌、不设 Origin、只看 2xx）；
+        每次调用会额外记一行 legacy 标记便于发现。默认关闭，诊断完后请解除该环境变量。
 
     使用场景：
         - 浏览器扩展一键把资源发回桌面程序。
@@ -1064,6 +1268,28 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         含义：若配置中提供，可指定 CatCatchServer 首选端口；默认是 9527。
 
 
+11.7 环境变量
+    以下环境变量会影响运行时行为，默认全部关闭；修改后需重启程序才会生效。
+
+    M3U8D_LOG_DEBUG
+        含义：设为 `1` 时把文件级日志从默认 INFO 提升到 DEBUG。
+        说明：正常使用建议保持关闭，只在需要抓详细运行细节时开启。
+
+    SECURITY_DEBUG
+        含义：设为 `1` 时启用独立的 `debug.sensitive.log`，用于排障时记录命令行与敏感头的原始内容。
+        说明：该文件会与主日志同目录但单独存放；调试完成后应及时关闭该环境变量或删除该文件，
+        避免敏感信息长期留在磁盘上。
+
+    M3U8D_HANDOFF_LEGACY
+        含义：设为 `1` 时协议处理器退化为旧行为（不读令牌、不设 Origin、只看 2xx），
+        作为 `m3u8dl://` 投递异常时的紧急回滚通道。日常请保持关闭。
+
+    M3U8D_SECURITY_DIAGNOSTIC
+        含义：设为 `1` 且同时在配置中把 `security.allow_weak_manifest_verification` 设为 true 时，
+        允许组件更新在诊断模式下放宽 manifest 校验。
+        说明：仅用于离线诊断；正常环境下必须两者都保持关闭。
+
+
 ================================================================================
 12. 常见操作示例
 ================================================================================
@@ -1153,6 +1379,15 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
 
 13.6 为什么历史记录里还能重下旧任务
     因为历史记录不仅存了 URL，还会尽量保存 headers、engine、save_dir、selected_variant、master_url、media_url 等上下文。
+
+13.7 内网或局域网地址无法下载
+    为了降低通过本程序访问内网 / 云元数据（`127.0.0.1`、`10.x`、`172.16/12`、`192.168.x`、`169.254.x`、
+    `fc00::/7` 等）的风险，m3u8 解析与抓取默认拒绝非公网地址。
+    日志里会看到 `SSRFBlocked` 或 `ssrf_blocked` 这类标记。
+
+    如果你确实是在企业内网通过反向代理对外提供的公网域名下载，可以在 `config.json` 的 `features` 中
+    把 `allow_private_networks` 设为 `true` 并重启程序。
+    日志会打印显著告警，提示这是一条“降权”路径。一般用户请保持默认的 `false`。
 
 
 ================================================================================

@@ -248,6 +248,18 @@ class ResourcePanel(QWidget):
     
     def add_resource(self, resource: M3U8Resource, engine_name: str):
         """添加检测到的资源"""
+        existing_row = self._find_resource_row(resource)
+        if existing_row >= 0:
+            self.resources[existing_row] = (resource, engine_name)
+            self._refresh_resource_row(existing_row)
+            self._refresh_linked_variant_rows(resource)
+            self._rebuild_dedup_cache()
+            if self._features.get("ui_filter_search", True):
+                self._update_source_filter(self._extract_source_domain(resource.url, resource.page_url))
+                self._apply_filters()
+            logger.debug(f"资源已刷新: {resource.title}")
+            return
+
         # 智能去重：生成标准化的去重键
         dedup_key = self._generate_dedup_key(resource)
         if self._features.get("sniffer_dedup_enabled", True):
@@ -345,14 +357,13 @@ class ResourcePanel(QWidget):
                          pass  # 继续执行，不 return
                      elif is_current_generic and not is_new_generic:
                          logger.info(f"更新 YouTube 资源标题: {current_title} -> {resource.title}")
-                         # 更新表格中的标题
-                         if current_title_item:
-                             current_title_item.setText(f"📹 {resource.title}")
-                             current_title_item.setToolTip(resource.title)
-                             
-                         # 更新内部存储的资源对象
-                         original_resource, original_engine = self.resources[existing_row]
+                         original_resource, _original_engine = self.resources[existing_row]
                          original_resource.title = resource.title
+                         if resource.page_title:
+                             original_resource.page_title = resource.page_title
+                         self._refresh_resource_row(existing_row)
+                         self._refresh_linked_variant_rows(original_resource)
+                         self._rebuild_dedup_cache()
                          return  # 已更新，不需要添加新行
                      else:
                          # 标题相同或都是通用标题，跳过重复
@@ -402,7 +413,14 @@ class ResourcePanel(QWidget):
         self.resource_table.setItem(row, 0, title_item)
         
         # 1 - 类型（带颜色）
-        type_item = QTableWidgetItem(TR(f"type_{resource_type.lower().replace(' ', '_')}"))
+        # 纯格式名 (M3U8/MPD/MP4/FLV/MKV/WEBM/TS) 直接使用裸值,与筛选下拉框一致;
+        # 仅 "Unknown / Video Stream / Playlist" 三个语义类型走 i18n 翻译,
+        # 其它值若缺键会经 i18n 兜底变成 "Type M3u8" 破坏筛选比对。
+        if resource_type in ("Unknown", "Video Stream", "Playlist"):
+            display_type = TR(f"type_{resource_type.lower().replace(' ', '_')}")
+        else:
+            display_type = resource_type
+        type_item = QTableWidgetItem(display_type)
         type_item.setData(Qt.ItemDataRole.UserRole, resource_type) # 存储原始类型用于翻译
         type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if resource_type == 'M3U8':
@@ -551,6 +569,63 @@ class ResourcePanel(QWidget):
                 return row
         return -1
 
+    @staticmethod
+    def _compose_variant_title(base_title: str, quality_label: str = "") -> str:
+        """Compose a variant title from the latest parent title and quality label."""
+        title = M3U8Resource._sanitize_title(base_title or "") or "untitled_video"
+        suffix = M3U8Resource._sanitize_title(quality_label or "")
+        if suffix and suffix not in title:
+            return f"{title} [{suffix}]"
+        return title
+
+    def _refresh_linked_variant_rows(self, parent_resource: M3U8Resource):
+        """Refresh already-listed variant rows that inherit titles from a parent resource."""
+        for row, (resource, _engine_name) in enumerate(self.resources):
+            if not getattr(resource, "is_variant", False):
+                continue
+            if getattr(resource, "variant_parent_resource", None) is not parent_resource:
+                continue
+            self._refresh_resource_row(row)
+ 
+    def _refresh_resource_row(self, row: int):
+        """Refresh mutable display fields for an already-listed resource."""
+        if not (0 <= row < len(self.resources)):
+            return
+        if not (0 <= row < self.resource_table.rowCount()):
+            return
+
+        resource, engine_name = self.resources[row]
+        if getattr(resource, "is_variant", False):
+            parent_resource = getattr(resource, "variant_parent_resource", None)
+            if parent_resource is not None:
+                resource.title = ResourcePanel._compose_variant_title(
+                    parent_resource.title,
+                    getattr(resource, "quality_label", ""),
+                )
+                if getattr(parent_resource, "page_title", ""):
+                    resource.page_title = parent_resource.page_title
+        filename = resource.title
+
+        title_item = self.resource_table.item(row, 0)
+        if title_item:
+            title_item.setText(f"📹 {filename}")
+            title_item.setToolTip(f"文件名: {filename}\n完整URL: {resource.url}")
+
+        source_domain = self._extract_source_domain(resource.url, resource.page_url)
+        domain_item = self.resource_table.item(row, 3)
+        if domain_item:
+            domain_item.setText(source_domain)
+            domain_item.setToolTip(f"来源页面: {resource.page_url}")
+
+        engine_item = self.resource_table.item(row, 4)
+        if engine_item:
+            engine_icon = self._get_engine_icon(engine_name)
+            engine_item.setText(f"{engine_icon} {engine_name}")
+
+        time_item = self.resource_table.item(row, 5)
+        if time_item:
+            time_item.setText(resource.timestamp.strftime('%H:%M:%S'))
+
     def _parse_m3u8_variants(self, resource: M3U8Resource, row: int):
         """后台解析 M3U8 master playlist，更新清晰度列"""
         thread = M3U8FetchThread(resource.url, resource.headers)
@@ -594,9 +669,7 @@ class ResourcePanel(QWidget):
                         else:
                             quality_label = "auto"
 
-                        variant_title = resource.title
-                        if quality_label and quality_label not in variant_title:
-                            variant_title = f"{variant_title} [{quality_label}]"
+                        variant_title = ResourcePanel._compose_variant_title(resource.title, quality_label)
 
                         variant_resource = M3U8Resource(
                             url=variant.get('url', resource.url),
@@ -609,6 +682,7 @@ class ResourcePanel(QWidget):
                         variant_resource.is_variant = True
                         variant_resource.variant_info = variant
                         variant_resource.quality_label = quality_label
+                        variant_resource.variant_parent_resource = resource
 
                         self.add_resource(variant_resource, engine_name)
         

@@ -1,10 +1,9 @@
 """
 Aria2 engine wrapper for direct link downloads with multi-threading
 """
-import subprocess
 import re
 from pathlib import Path
-from engines.base_engine import BaseEngine
+from engines.base_engine import BaseEngine, EngineResult
 from core.task_model import DownloadTask
 from utils.logger import logger
 from utils.config_manager import config
@@ -38,39 +37,43 @@ class Aria2Engine(BaseEngine):
         try:
             cmd = self._build_command(task)
             logger.info(f"[Aria2] 开始下载: {task.filename}")
-            logger.debug(f"命令: {' '.join(cmd)}")
-            
-            # Windows 下隐藏 cmd 窗口
-            creation_flags = 0
-            if hasattr(subprocess, 'CREATE_NO_WINDOW'):
-                creation_flags = subprocess.CREATE_NO_WINDOW
-            
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='ignore',
-                creationflags=creation_flags
-            )
-            
+            self.log_command(cmd)
+
+            # ``BaseEngine.spawn`` centralizes the CREATE_NO_WINDOW /
+            # close_fds / byte-mode PIPE plumbing (task 29.1 / Requirement
+            # 37.1). ``sensitive=False`` suppresses spawn's internal
+            # ``log_command`` call because the redacted argv was already
+            # emitted on the line above — otherwise every run would print
+            # the same cmd twice. ``read_loop`` drains stdout and stderr
+            # on separate pump threads and dispatches by ``stream_tag``
+            # (task 9.2), so the legacy ``stderr=STDOUT`` merge is no
+            # longer required; ``_parse_line`` treats both tags uniformly.
+            process = self.spawn(cmd, sensitive=False)
+
             task.process = process
-            
-            for line in process.stdout:
-                line = line.strip()
-                if line:
-                    logger.debug(f"[Aria2] {line}")
-                    progress_data = self.parse_progress(line)
-                    if progress_data['progress'] > 0 or progress_data['speed']:
-                        progress_callback(progress_data)
-            
-            returncode = process.wait()
-            success = returncode == 0
-            
+
+            # ``read_loop`` drives cancellation and PIPE draining; ``_parse_line``
+            # reads per-call state off the thread-local slot.
+            self._tls.progress_callback = progress_callback
+            try:
+                result: EngineResult = self.read_loop(process, task, self._parse_line)
+            finally:
+                self._tls.progress_callback = None
+
+            if result.status in {"stopped", "switched", "paused"}:
+                # Stop requests surface as ``False`` to match the legacy
+                # download() contract; DownloadManager classifies them via
+                # ``task.stop_reason``.
+                return False
+
+            success = result.status == "ok"
+
             if success:
                 logger.info(f"[Aria2] 下载成功: {task.filename}")
             else:
+                returncode = (
+                    result.returncode if result.returncode is not None else -1
+                )
                 logger.error(f"[Aria2] 下载失败: {task.filename}, 退出码: {returncode}")
                 logger.error("[Aria2] 建议检查直链有效性或 Referer/Cookie")
             
@@ -80,12 +83,26 @@ class Aria2Engine(BaseEngine):
             logger.error(f"[Aria2] 下载异常: {e}")
             task.error_message = str(e)
             return False
+
+    def _parse_line(self, stream_tag: str, text: str) -> None:
+        """``read_loop`` callback: log + parse one aria2 output line."""
+        line = text.strip()
+        if not line:
+            return
+        logger.debug(f"[Aria2] {line}")
+        progress_data = self.parse_progress(line)
+        if progress_data['progress'] > 0 or progress_data['speed']:
+            progress_callback = getattr(self._tls, "progress_callback", None)
+            if progress_callback is not None:
+                progress_callback(progress_data)
     
     def _build_command(self, task: DownloadTask) -> list:
         """构建下载命令"""
         max_conn = config.get("engines.aria2.max_connection_per_server", 16)
         split = config.get("engines.aria2.split", 16)
-        speed_limit = config.get("speed_limit", 0)  # 全局限速 (MB/s)
+        # Task 27.3: speed_limit unit is MB/s (mebibytes per second).
+        # A value of 0 means "no limit" — do NOT add the flag at all.
+        speed_limit = config.get("speed_limit", 0)
         retry_count = config.get("engines.n_m3u8dl_re.retry_count", 5)  # 使用统一的重试次数配置
         
         cmd = [
@@ -102,10 +119,20 @@ class Aria2Engine(BaseEngine):
             '--console-log-level', 'notice',
         ]
         
-        # 添加限速
-        if speed_limit > 0:
-            # aria2 使用 --max-download-limit 参数，支持 K, M 后缀
-            cmd.extend(['--max-download-limit', f'{speed_limit}M'])
+        # Task 27.3: speed_limit unit: MB/s (aria2 accepts N[M|K];
+        # the ``M`` suffix is mebibytes/s, matching the unified UI semantic).
+        # Use ``--max-overall-download-limit`` so the cap applies across all
+        # concurrent connections (``--max-download-limit`` is per-download
+        # and would let the aggregate exceed the user's configured ceiling).
+        try:
+            speed_limit_mb = int(speed_limit)
+        except (TypeError, ValueError):
+            speed_limit_mb = 0
+        if speed_limit_mb > 0:
+            cmd.extend([
+                '--max-overall-download-limit',
+                f'{speed_limit_mb}M',
+            ])
         
         # 添加请求头
         if task.headers.get('user-agent'):

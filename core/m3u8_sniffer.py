@@ -11,6 +11,8 @@ from utils.config_manager import config
 from utils.logger import logger
 from utils.notification import notify_resource_found
 from utils.i18n import TR
+from utils.ssrf_guard import SSRFBlocked, ensure_public
+from utils.redact import redact_url
 
 
 class M3U8Sniffer:
@@ -26,6 +28,24 @@ class M3U8Sniffer:
     def add_resource(self, url: str, headers: dict, page_url: str, page_title: str = "") -> Optional[M3U8Resource]:
         """Add a detected resource, deduping by URL and merging context when duplicated."""
         headers = headers or {}
+
+        # R4 SSRF filter: reject resources whose host resolves to a
+        # loopback/private/link-local/metadata address before we ever
+        # store them. This prevents a malicious page (or a misbehaving
+        # browser extension) from parking internal URLs in the resource
+        # list where the downloader would later fetch them.
+        try:
+            ensure_public(url)
+        except SSRFBlocked as exc:
+            logger.warning(
+                "[SSRF] resource rejected",
+                event="sniffer_ssrf_blocked",
+                stage="ssrf",
+                reason=exc.reason,
+                url=redact_url(url),
+            )
+            return None
+
         url_lower = (url or "").lower()
         is_m3u8 = ".m3u8" in url_lower
         candidate_score = 0
@@ -48,11 +68,13 @@ class M3U8Sniffer:
                     candidate_score,
                 )
                 logger.debug(
-                    TR("log_resource_merged") if merged else TR("log_resource_exists"), 
-                    event="sniffer_dedup", 
-                    url=url, 
+                    TR("log_resource_merged") if merged else TR("log_resource_exists"),
+                    event="sniffer_dedup",
+                    url=url,
                     merged=merged
                 )
+                if merged and self.on_resource_found:
+                    self.on_resource_found(existing)
                 return existing
             logger.debug(TR("log_resource_exists"), event="sniffer_dedup", url=url)
             return None
@@ -144,17 +166,15 @@ class M3U8Sniffer:
                 resource.page_url = page_url
                 changed = True
 
-        if page_title and page_title != resource.page_title:
-            if not resource.page_title:
-                resource.page_title = page_title
-                changed = True
-
-        if changed:
-            resource.timestamp = datetime.now()
+        if resource.apply_page_title(page_title):
+            changed = True
 
         if candidate_score and candidate_score > getattr(resource, "candidate_score", 0):
             resource.candidate_score = candidate_score
             changed = True
+
+        if changed:
+            resource.timestamp = datetime.now()
 
         return changed
 
@@ -214,8 +234,10 @@ class M3U8Sniffer:
                 parsed = urlparse(normalized.get("referer"))
                 if parsed.scheme and parsed.netloc:
                     normalized["origin"] = f"{parsed.scheme}://{parsed.netloc}"
-            except Exception:
-                pass
+            except ValueError:
+                # Malformed referer cannot produce an origin; keep normalized
+                # as-is. Do not log the referer itself — it may carry tokens.
+                logger.debug("m3u8_sniffer: referer→origin fallback skipped")
 
         return normalized
 
@@ -271,7 +293,9 @@ class M3U8Sniffer:
             page_host = urlparse(page_url).hostname or ""
             if host and page_host and host == page_host:
                 score += 8
-        except Exception:
-            pass
+        except ValueError:
+            # urlparse raises on malformed IPv6 / invalid percent-encoding.
+            # Scoring is a best-effort heuristic; drop the bonus silently.
+            logger.debug("m3u8_sniffer: host-match score skipped")
 
         return score
