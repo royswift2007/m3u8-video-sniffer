@@ -1,10 +1,19 @@
 """
 Resource panel for displaying detected video resources
 """
+import time
+
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton,
                              QHBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView,
                              QLineEdit, QComboBox, QFrame)
 from PyQt6.QtCore import pyqtSignal, Qt
+from core.download_context import (
+    RESOURCE_TYPE_DASH,
+    RESOURCE_TYPE_DIRECT_VIDEO,
+    RESOURCE_TYPE_HLS,
+    RESOURCE_TYPE_SEGMENT,
+    RESOURCE_TYPE_UNKNOWN,
+)
 from core.task_model import M3U8Resource
 from core.m3u8_parser import M3U8FetchThread
 from utils.logger import logger
@@ -23,6 +32,8 @@ class ResourcePanel(QWidget):
         self._seen_keys = set()  # 用于智能去重
         self._page_url_map = {}  # page_url -> row_index 映射
         self._m3u8_parse_threads = []  # 保持后台解析线程引用，防止 GC
+        self._m3u8_retired_parse_threads = []  # 延迟持有已完成 QThread，避免 finished 回调链路中销毁
+        self._hidden_segment_count = 0
         from utils.config_manager import config
         self._features = config.get("features", {}) or {}
         self._init_ui()
@@ -201,7 +212,7 @@ class ResourcePanel(QWidget):
         type_idx = self.type_filter.currentIndex()
         self.type_filter.clear()
         self.type_filter.addItems([
-            TR("filter_all_types"), "M3U8", "MPD", "MP4", "FLV", "MKV", "WEBM", "TS", 
+            TR("filter_all_types"), "M3U8", "MPD", "MP4", "FLV", "MKV", "WEBM", "TS", "Segment",
             TR("type_video_stream"), TR("type_playlist"), TR("type_unknown")
         ])
         self.type_filter.setCurrentIndex(max(0, type_idx))
@@ -246,14 +257,59 @@ class ResourcePanel(QWidget):
                     type_item.setText(translated)
                     type_item.setData(Qt.ItemDataRole.UserRole, raw_type)
     
+    def _should_hide_suppressed_resource(self, resource: M3U8Resource) -> bool:
+        """Return True when a suppressed segment should not be shown as a main row."""
+        if not self._features.get("segment_suppression_enabled", True):
+            return False
+        if self._features.get("segment_advanced_view_enabled", False):
+            return False
+        return bool(getattr(resource, "is_suppressed", False))
+
+    def _record_hidden_segment(self, resource: M3U8Resource) -> None:
+        """Track hidden segment noise without adding a clickable row."""
+        self._hidden_segment_count += 1
+        logger.info(
+            "资源列表隐藏 segment 分片",
+            event="resource_panel_segment_hidden",
+            hidden_count=self._hidden_segment_count,
+            group_key=getattr(resource, "segment_group_key", ""),
+            group_count=getattr(resource, "segment_group_count", 0),
+        )
+
+    def _remove_resource_row(self, row: int) -> None:
+        """Remove one visible resource row and rebuild row-index caches."""
+        if 0 <= row < len(self.resources):
+            self.resources.pop(row)
+        if 0 <= row < self.resource_table.rowCount():
+            self.resource_table.removeRow(row)
+        self._rebuild_dedup_cache()
+        if self._features.get("ui_filter_search", True):
+            self._apply_filters()
+
+    def _find_resource_row_by_dedup_key(self, dedup_key: str) -> int:
+        """Find a visible row by the same dedup/group key."""
+        if not dedup_key:
+            return -1
+        for row, (current_resource, _engine_name) in enumerate(self.resources):
+            if self._generate_dedup_key(current_resource) == dedup_key:
+                return row
+        return -1
+
     def add_resource(self, resource: M3U8Resource, engine_name: str):
         """添加检测到的资源"""
         existing_row = self._find_resource_row(resource)
+        if existing_row >= 0 and self._should_hide_suppressed_resource(resource):
+            self._remove_resource_row(existing_row)
+            self._record_hidden_segment(resource)
+            return
         if existing_row >= 0:
             self.resources[existing_row] = (resource, engine_name)
             self._refresh_resource_row(existing_row)
             self._refresh_linked_variant_rows(resource)
             self._rebuild_dedup_cache()
+            resource_type = self._get_resource_display_type(resource)
+            if self._should_parse_m3u8_variants(resource, resource_type):
+                self._parse_m3u8_variants(resource, existing_row)
             if self._features.get("ui_filter_search", True):
                 self._update_source_filter(self._extract_source_domain(resource.url, resource.page_url))
                 self._apply_filters()
@@ -262,6 +318,13 @@ class ResourcePanel(QWidget):
 
         # 智能去重：生成标准化的去重键
         dedup_key = self._generate_dedup_key(resource)
+        if self._should_hide_suppressed_resource(resource):
+            grouped_row = self._find_resource_row_by_dedup_key(dedup_key)
+            if grouped_row >= 0:
+                self._remove_resource_row(grouped_row)
+            self._seen_keys.add(dedup_key)
+            self._record_hidden_segment(resource)
+            return
         if self._features.get("sniffer_dedup_enabled", True):
             if dedup_key in self._seen_keys:
                 return  # 跳过完全重复的资源
@@ -393,7 +456,7 @@ class ResourcePanel(QWidget):
         query_params = parse_qs(parsed_url.query)
         
         # 提取资源类型
-        resource_type = self._get_resource_type(resource.url)
+        resource_type = self._get_resource_display_type(resource)
         
         # 从标题中提取文件名
         filename = resource.title
@@ -416,19 +479,11 @@ class ResourcePanel(QWidget):
         # 纯格式名 (M3U8/MPD/MP4/FLV/MKV/WEBM/TS) 直接使用裸值,与筛选下拉框一致;
         # 仅 "Unknown / Video Stream / Playlist" 三个语义类型走 i18n 翻译,
         # 其它值若缺键会经 i18n 兜底变成 "Type M3u8" 破坏筛选比对。
-        if resource_type in ("Unknown", "Video Stream", "Playlist"):
-            display_type = TR(f"type_{resource_type.lower().replace(' ', '_')}")
-        else:
-            display_type = resource_type
+        display_type = self._format_resource_type(resource_type)
         type_item = QTableWidgetItem(display_type)
         type_item.setData(Qt.ItemDataRole.UserRole, resource_type) # 存储原始类型用于翻译
         type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        if resource_type == 'M3U8':
-            type_item.setForeground(Qt.GlobalColor.darkGreen)
-        elif resource_type == 'MPD':
-            type_item.setForeground(Qt.GlobalColor.darkBlue)
-        elif resource_type in ['MP4', 'FLV', 'MKV', 'WEBM']:
-            type_item.setForeground(Qt.GlobalColor.darkMagenta)
+        self._apply_resource_type_style(type_item, resource_type)
         self.resource_table.setItem(row, 1, type_item)
         
         # 2 - 清晰度
@@ -466,7 +521,7 @@ class ResourcePanel(QWidget):
             self._update_source_filter(source_domain)
         
         # 如果是 M3U8 资源，后台解析 master playlist 获取可用分辨率
-        if resource_type == 'M3U8' and not getattr(resource, "is_variant", False):
+        if self._should_parse_m3u8_variants(resource, resource_type):
             self._parse_m3u8_variants(resource, row)
 
         # 应用过滤条件
@@ -506,49 +561,66 @@ class ResourcePanel(QWidget):
         if 'googlevideo.com' in url or 'youtube.com' in url:
             itag = query_params.get('itag', [''])[0]
             if itag:
-                # YouTube itag 对应清晰度表 - 简化格式
                 itag_map = {
                     '18': '360', '22': '720', '37': '1080', '38': '2160',
-                    '133': '240', '134': '360', '135': '480', '136': '720', 
+                    '133': '240', '134': '360', '135': '480', '136': '720',
                     '137': '1080', '138': '2160', '160': '144',
-                    '298': '720(60)', '299': '1080(60)', 
+                    '298': '720(60)', '299': '1080(60)',
                     '264': '1440', '266': '2160',
                     '140': '音频128k', '141': '音频256k', '251': '音频OPUS',
-                    # 更多常见 itag
                     '243': '360', '244': '480', '247': '720', '248': '1080',
                     '271': '1440', '313': '2160', '302': '720(60)', '303': '1080(60)',
                 }
-                quality = itag_map.get(itag, f'itag{itag}')
-                return quality
-            else:
-                # YouTube 但没有 itag，可能是主播放器请求，不显示清晰度
-                return ""
-        
-        # 通用: 从 URL 路径中提取分辨率 + 帧率
-        # 匹配 1080p60, 720p, etc
-        match_with_fps = re.search(r'(\d{3,4})[pP](\d{2})', url)
-        if match_with_fps:
-            return f"{match_with_fps.group(1)}({match_with_fps.group(2)})"
-        
-        resolution_match = re.search(r'(\d{3,4})[pP]', url)
-        if resolution_match:
-            return resolution_match.group(1)
-        
-        # 从 URL 中提取数字分辨率标识 (更严格的匹配)
-        if '/2160/' in url or '_2160.' in url or 'quality=2160' in url_lower:
-            return "2160"
-        if '/1440/' in url or '_1440.' in url or 'quality=1440' in url_lower:
-            return "1440"
-        if '/1080/' in url or '_1080.' in url or 'quality=1080' in url_lower:
-            return "1080"
-        if '/720/' in url or '_720.' in url or 'quality=720' in url_lower:
-            return "720"
-        if '/480/' in url or '_480.' in url or 'quality=480' in url_lower:
-            return "480"
-        if '/360/' in url or '_360.' in url or 'quality=360' in url_lower:
-            return "360"
-        
-        # M3U8 特殊标识
+                return itag_map.get(itag, f'itag{itag}')
+            return ""
+
+        # 标准视频分辨率集合（只接受这些值，避免把文件序号等误识别为分辨率）
+        _KNOWN_HEIGHTS: frozenset = frozenset({
+            144, 240, 360, 480, 540, 720, 1080, 1440, 2160, 4320,
+        })
+
+        def _valid_res(h: int) -> bool:
+            return h in _KNOWN_HEIGHTS
+
+        # 1) 1080p60, 720p30 等「分辨率 p 帧率」格式
+        match_fps = re.search(r'(\d{3,4})[pP](\d{2})', url)
+        if match_fps:
+            h = int(match_fps.group(1))
+            if _valid_res(h):
+                return f"{h}({match_fps.group(2)})"
+
+        # 2) 720p, 1080p 等
+        match_p = re.search(r'(\d{3,4})[pP]', url)
+        if match_p:
+            h = int(match_p.group(1))
+            if _valid_res(h):
+                return str(h)
+
+        # 3) /720/, /1080/ 等路径段
+        match_seg = re.search(r'/(\d{3,4})/', url_lower)
+        if match_seg:
+            h = int(match_seg.group(1))
+            if _valid_res(h):
+                return str(h)
+
+        # 4) _1080., -720., .1440. 等分隔符包围的数字
+        match_sep = re.search(r'[._\-](\d{3,4})[.\-_]', url_lower)
+        if match_sep:
+            h = int(match_sep.group(1))
+            if _valid_res(h):
+                return str(h)
+
+        # 5) 查询参数: ?res=1080, &resolution=720, &quality=2160, &height=480
+        match_q = re.search(
+            r'[?&](?:res|resolution|quality|height)=(\d{3,4})',
+            url_lower,
+        )
+        if match_q:
+            h = int(match_q.group(1))
+            if _valid_res(h):
+                return str(h)
+
+        # M3U8: 确实没有分辨率信息时，根据 URL 特征报告清单类型
         if '.m3u8' in url_lower:
             if 'master' in url_lower:
                 return TR("type_master_playlist")
@@ -605,11 +677,28 @@ class ResourcePanel(QWidget):
                 if getattr(parent_resource, "page_title", ""):
                     resource.page_title = parent_resource.page_title
         filename = resource.title
+        resource_type = self._get_resource_display_type(resource)
 
         title_item = self.resource_table.item(row, 0)
         if title_item:
             title_item.setText(f"📹 {filename}")
             title_item.setToolTip(f"文件名: {filename}\n完整URL: {resource.url}")
+
+        type_item = self.resource_table.item(row, 1)
+        if type_item:
+            type_item.setText(self._format_resource_type(resource_type))
+            type_item.setData(Qt.ItemDataRole.UserRole, resource_type)
+            type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._apply_resource_type_style(type_item, resource_type)
+
+        quality_item = self.resource_table.item(row, 2)
+        if quality_item and not getattr(resource, "variants", None):
+            if getattr(resource, "is_variant", False) and getattr(resource, "quality_label", ""):
+                quality_item.setText(resource.quality_label)
+            else:
+                from urllib.parse import urlparse, parse_qs
+                parsed_url = urlparse(resource.url)
+                quality_item.setText(self._extract_quality_info(resource.url, parse_qs(parsed_url.query)))
 
         source_domain = self._extract_source_domain(resource.url, resource.page_url)
         domain_item = self.resource_table.item(row, 3)
@@ -626,32 +715,231 @@ class ResourcePanel(QWidget):
         if time_item:
             time_item.setText(resource.timestamp.strftime('%H:%M:%S'))
 
+    @staticmethod
+    def _derive_master_url(media_url: str) -> str | None:
+        """从 media playlist URL 推导 master playlist 地址。
+
+        常见模式：
+        * ``.../index-f2-v1-a1.m3u8`` → ``.../master.m3u8``
+        * ``.../playlist_1080p.m3u8`` → ``.../master.m3u8``
+        返回推导出的 URL 或 None（无法推导时）。
+        """
+        import re
+        from urllib.parse import urljoin
+
+        if not media_url or ".m3u8" not in media_url.lower():
+            return None
+
+        # 1) URL 中直接有 master 字样 → 不需推导
+        if "master" in media_url.lower():
+            return media_url
+
+        # 2) 将最后一个 / 之后的文件名替换为 master.m3u8
+        last_slash = media_url.rfind("/")
+        if last_slash >= 0:
+            base = media_url[:last_slash]
+            return f"{base}/master.m3u8"
+
+        return None
+
+    @staticmethod
+    def _select_m3u8_parse_url(resource: M3U8Resource) -> str:
+        """Return the best URL to fetch when parsing HLS variants.
+
+        ``resource.url`` can be a media playlist or a response-only API URL.
+        When the sniffer later merges an explicit ``master_url`` into the same
+        resource, prefer that URL even if it has no literal ``.m3u8`` suffix.
+        """
+        master = getattr(resource, "master_url", None)
+        if isinstance(master, str) and master.strip():
+            return master.strip()
+        return getattr(resource, "url", "") or ""
+
+    @staticmethod
+    def _should_parse_m3u8_variants(resource: M3U8Resource, resource_type: str) -> bool:
+        """Decide whether the resource list should start/retry variant parsing."""
+        if resource_type != 'M3U8':
+            return False
+        if getattr(resource, "is_variant", False):
+            return False
+        if getattr(resource, "variants", None):
+            return False
+        if getattr(resource, "variants_parse_in_progress", False):
+            return False
+
+        if not getattr(resource, "variants_parse_attempted", False):
+            return True
+
+        # A previous attempt may have fetched a media playlist/API endpoint and
+        # returned no variants. If the sniffer subsequently merges a different
+        # master_url, retry once against that new parse target so 720p/1080p
+        # rows can be restored instead of leaving only the single parent link.
+        if not getattr(resource, "variants_parse_failed", False):
+            return False
+
+        parse_url = ResourcePanel._select_m3u8_parse_url(resource)
+        last_parse_url = getattr(resource, "variants_parse_url", "") or ""
+        return bool(parse_url and parse_url != last_parse_url)
+
+    @staticmethod
+    def _format_resource_type(resource_type: str) -> str:
+        """Return the translated display text for a resource type cell."""
+        if resource_type in ("Unknown", "Video Stream", "Playlist"):
+            return TR(f"type_{resource_type.lower().replace(' ', '_')}")
+        return resource_type
+
+    @staticmethod
+    def _apply_resource_type_style(type_item: QTableWidgetItem, resource_type: str) -> None:
+        """Apply the conventional color coding for a resource type cell."""
+        if resource_type == 'M3U8':
+            type_item.setForeground(Qt.GlobalColor.darkGreen)
+        elif resource_type == 'MPD':
+            type_item.setForeground(Qt.GlobalColor.darkBlue)
+        elif resource_type == 'Segment':
+            type_item.setForeground(Qt.GlobalColor.darkYellow)
+        elif resource_type in ['MP4', 'FLV', 'MKV', 'WEBM']:
+            type_item.setForeground(Qt.GlobalColor.darkMagenta)
+
+    @staticmethod
+    def _get_resource_display_type(resource: M3U8Resource) -> str:
+        """Map canonical resource context + URL hints to the table type label.
+
+        Response-only captures may identify an HLS playlist by MIME/context even
+        when the URL is an API endpoint without a ``.m3u8`` suffix. The resource
+        list must still treat those as M3U8 so master playlists are parsed and
+        variants (720p/1080p/...) are listed as selectable rows.
+        """
+        canonical = (getattr(resource, "resource_type", "") or "").strip().lower()
+        mime = (getattr(resource, "mime", "") or "").strip().lower()
+
+        if canonical == RESOURCE_TYPE_HLS or "mpegurl" in mime:
+            return 'M3U8'
+        if canonical == RESOURCE_TYPE_DASH or "dash+xml" in mime:
+            return 'MPD'
+        if canonical == RESOURCE_TYPE_SEGMENT:
+            return 'Segment'
+
+        url_type = ResourcePanel._get_resource_type(getattr(resource, "url", "") or "")
+        if url_type != 'Unknown':
+            return url_type
+        if canonical == RESOURCE_TYPE_DIRECT_VIDEO or mime.startswith("video/"):
+            return 'Video Stream'
+        return url_type
+
+    @staticmethod
+    def _build_variant_resource(
+        resource: M3U8Resource,
+        variant: dict,
+        quality_label: str,
+        master_url: str,
+    ) -> M3U8Resource:
+        """Create a selectable child row for one HLS variant.
+
+        The child keeps the parent HLS context so automatic engine selection can
+        still choose N_m3u8DL-RE for signed/API variant URLs that do not contain
+        a literal ``.m3u8`` extension.
+        """
+        variant_url = variant.get('url', resource.url)
+        canonical_type = (getattr(resource, "resource_type", "") or "").strip().lower()
+        if not canonical_type or canonical_type == RESOURCE_TYPE_UNKNOWN:
+            canonical_type = RESOURCE_TYPE_HLS
+        mime = getattr(resource, "mime", "") or "application/vnd.apple.mpegurl"
+        variant_title = ResourcePanel._compose_variant_title(resource.title, quality_label)
+
+        variant_resource = M3U8Resource(
+            url=variant_url,
+            headers=resource.headers,
+            page_url=resource.page_url,
+            title=variant_title,
+            page_title=resource.page_title,
+            source=getattr(resource, "source", "unknown"),
+            resource_type=canonical_type,
+            mime=mime,
+            master_url=master_url or getattr(resource, "master_url", None) or resource.url,
+            media_url=variant_url,
+            selected_engine=getattr(resource, "selected_engine", None),
+            temporary_cookie_allowed=bool(getattr(resource, "temporary_cookie_allowed", False)),
+            cookie_policy_source=getattr(resource, "cookie_policy_source", "") or "",
+            auth_policy_source=getattr(resource, "auth_policy_source", "") or "",
+            playlist_diagnostics=dict(getattr(resource, "playlist_diagnostics", {}) or {}),
+            detected_at=getattr(resource, "detected_at", time.time()),
+            expires_at=getattr(resource, "expires_at", None),
+            ephemeral_url=bool(getattr(resource, "ephemeral_url", False)),
+            ttl_warning=bool(getattr(resource, "ttl_warning", False)),
+        )
+        variant_resource.is_variant = True
+        variant_resource.variant_info = variant
+        variant_resource.quality_label = quality_label
+        variant_resource.variant_parent_resource = resource
+        return variant_resource
+
     def _parse_m3u8_variants(self, resource: M3U8Resource, row: int):
         """后台解析 M3U8 master playlist，更新清晰度列"""
-        thread = M3U8FetchThread(resource.url, resource.headers)
-        
-        def on_parsed(variants):
+        if getattr(resource, "variants_parse_in_progress", False):
+            logger.debug(
+                "资源列表 M3U8 解析已在进行，跳过重复启动",
+                event="resource_panel_m3u8_parse_skip_in_progress",
+                url=resource.url,
+            )
+            return
+
+        # 优先使用 master_url；缺失时后续从 media URL 推导。
+        parse_url = self._select_m3u8_parse_url(resource)
+
+        resource.variants_parse_in_progress = True
+        resource.variants_parse_attempted = True
+        resource.variants_parse_failed = False
+        resource.variants_parse_url = parse_url
+
+        # 解析完成的统一处理逻辑（在 UI 线程安全地调用）
+        def _apply_thread_diagnostics(thread_obj):
+            diagnostics = getattr(thread_obj, "playlist_diagnostics", {}) or {}
+            if isinstance(diagnostics, dict) and diagnostics:
+                resource.playlist_diagnostics = dict(diagnostics)
+                try:
+                    resource.detected_at = float(diagnostics.get("detected_at") or resource.detected_at)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    expires_at = diagnostics.get("expires_at")
+                    resource.expires_at = float(expires_at) if expires_at is not None else None
+                except (TypeError, ValueError):
+                    resource.expires_at = None
+                resource.ephemeral_url = bool(diagnostics.get("ephemeral_url", False))
+                resource.ttl_warning = bool(diagnostics.get("ttl_warning", False))
+
+        def _handle_result(variants, parsed_url=parse_url, thread_obj=None):
+            """将变体列表应用到 resource 和表格行的最终处理。"""
+            if thread_obj is not None:
+                _apply_thread_diagnostics(thread_obj)
+            resource.variants_parse_in_progress = False
+            resource.variants_parse_attempted = True
+            resource.variants_parse_failed = not bool(variants)
+            resource.variants_parse_url = parsed_url
+
             current_row = self._find_resource_row(resource, row)
             if variants and 0 <= current_row < self.resource_table.rowCount():
-                # 缓存到 resource 对象供下载时复用
                 resource.variants = variants
-                
-                # 构建分辨率摘要文本
+                resource.variants_parse_failed = False
+                resource.master_url = parsed_url or getattr(resource, "master_url", None) or resource.url
+                if not getattr(resource, "resource_type", None) or getattr(resource, "resource_type", "") == RESOURCE_TYPE_UNKNOWN:
+                    resource.resource_type = RESOURCE_TYPE_HLS
+                if not getattr(resource, "mime", ""):
+                    resource.mime = "application/vnd.apple.mpegurl"
+
                 heights = [v.get('height', 0) for v in variants if v.get('height', 0) > 0]
                 if heights:
                     quality_text = '/'.join(f"{h}p" for h in sorted(set(heights), reverse=True))
                 else:
                     quality_text = f"{len(variants)} variants"
-                
-                # 更新表格清晰度列
+
                 quality_item = self.resource_table.item(current_row, 2)
                 if quality_item:
                     quality_item.setText(quality_text)
                     quality_item.setToolTip(f"可用分辨率: {quality_text}")
-                
+
                 logger.info(f"M3U8 分辨率解析完成: {quality_text} ({resource.title})")
 
-                # 为每个变体创建独立资源项（只生成一次）
                 if not getattr(resource, "variants_listed", False):
                     resource.variants_listed = True
                     engine_name = None
@@ -669,28 +957,77 @@ class ResourcePanel(QWidget):
                         else:
                             quality_label = "auto"
 
-                        variant_title = ResourcePanel._compose_variant_title(resource.title, quality_label)
-
-                        variant_resource = M3U8Resource(
-                            url=variant.get('url', resource.url),
-                            headers=resource.headers,
-                            page_url=resource.page_url,
-                            title=variant_title,
-                            page_title=resource.page_title,
-                            selected_engine=getattr(resource, "selected_engine", None),
+                        variant_resource = ResourcePanel._build_variant_resource(
+                            resource,
+                            variant,
+                            quality_label,
+                            resource.master_url or parsed_url or resource.url,
                         )
-                        variant_resource.is_variant = True
-                        variant_resource.variant_info = variant
-                        variant_resource.quality_label = quality_label
-                        variant_resource.variant_parent_resource = resource
 
                         self.add_resource(variant_resource, engine_name)
-        
-        thread.finished.connect(on_parsed)
+
+            logger.debug(
+                "资源列表 M3U8 解析结果处理完成",
+                event="resource_panel_m3u8_parse_handle_done",
+                url=resource.url,
+                variant_count=len(variants or []),
+            )
+
+        def _on_first_fetch(first_variants):
+            """首次 fetch 回调：有结果直接处理，无结果尝试推导 master 再试一次。"""
+            _apply_thread_diagnostics(thread)
+            if first_variants:
+                _handle_result(first_variants, parse_url, thread)
+                return
+
+            # 若已明确在用 master 地址，不多试。
+            master = getattr(resource, "master_url", None)
+            if master and isinstance(master, str) and master.strip() and parse_url == master.strip():
+                _handle_result([], parse_url, thread)
+                return
+
+            derived = self._derive_master_url(resource.url)
+            if not derived:
+                _handle_result([], parse_url, thread)
+                return
+
+            logger.info(
+                "首次 fetch 无变体，尝试从 URL 推导 master 再试",
+                event="resource_panel_m3u8_derive_master",
+                original=resource.url,
+                derived=derived,
+            )
+            second = M3U8FetchThread(derived, resource.headers)
+            second.finished.connect(lambda variants: _handle_result(variants, derived, second))
+            second.finished.connect(lambda _variants, t=second: _cleanup_self(t))
+            second.start()
+            self._m3u8_parse_threads.append(second)
+
+        def _cleanup_self(t):
+            """从活跃列表移出已完成线程，延迟持有到面板生命周期结束。"""
+            try:
+                if t.isRunning():
+                    t.request_stop()
+                    t.wait(2000)
+            except RuntimeError:
+                pass
+            try:
+                self._m3u8_parse_threads.remove(t)
+            except ValueError:
+                pass
+
+            if not hasattr(self, "_m3u8_retired_parse_threads"):
+                self._m3u8_retired_parse_threads = []
+            self._m3u8_retired_parse_threads.append(t)
+
+        thread = M3U8FetchThread(parse_url, resource.headers)
+        thread.finished.connect(_on_first_fetch)
+        thread.finished.connect(lambda _variants, t=thread: _cleanup_self(t))
         thread.start()
-        self._m3u8_parse_threads.append(thread)  # 防止 GC
+        self._m3u8_parse_threads.append(thread)
     
-    def _get_resource_type(self, url: str) -> str:
+    @staticmethod
+    def _get_resource_type(url: str) -> str:
         """从 URL 提取资源类型"""
         url_lower = url.lower()
         
@@ -711,6 +1048,9 @@ class ResourcePanel(QWidget):
             '.wmv': 'WMV',
             '.m4v': 'M4V',
             '.ts': 'TS',
+            '.m4s': 'Segment',
+            '.aac': 'Segment',
+            '.key': 'Segment',
             '.3gp': '3GP',
         }
         
@@ -748,6 +1088,9 @@ class ResourcePanel(QWidget):
         path = parsed.path.lower()
         url_lower = (url or "").lower()
         
+        if getattr(resource, "segment_group_key", ""):
+            return f"segment:{resource.segment_group_key}"
+
         # M3U8 变体：确保 master 的不同清晰度可分别显示
         if getattr(resource, "is_variant", False) and getattr(resource, "variant_info", None):
             vinfo = resource.variant_info
@@ -787,6 +1130,7 @@ class ResourcePanel(QWidget):
         self.resources.clear()
         self._seen_keys.clear()  # 同时清空去重集合
         self._page_url_map.clear()
+        self._hidden_segment_count = 0
         if self._features.get("ui_filter_search", True):
             self._reset_filters()
         logger.info("资源列表已清空")
@@ -950,3 +1294,4 @@ class ResourcePanel(QWidget):
         self.resources.clear()
         self._seen_keys.clear()
         self._page_url_map.clear()
+        self._hidden_segment_count = 0

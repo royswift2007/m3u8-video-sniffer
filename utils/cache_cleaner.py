@@ -99,7 +99,9 @@ def _artifact_matches_skip(entry_name: str, skip_tokens: Iterable[str]) -> bool:
         if not token:
             continue
         t = token.lower()
-        if lowered == t or lowered.startswith(t) or t in lowered:
+        # ISS-40: 与 ui/download_queue.py 的 _task_owns_artifact 对齐为精确匹配策略
+        # 仅当 entry 完全等于 filename 或以 "filename." 开头时视为属于该任务
+        if lowered == t or lowered.startswith(f"{t}."):
             return True
     return False
 

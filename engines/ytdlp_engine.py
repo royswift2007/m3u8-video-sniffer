@@ -9,8 +9,12 @@ from typing import Mapping, Optional
 from urllib.parse import urlparse
 
 from engines.base_engine import BaseEngine, EngineResult
+from core.app_paths import get_data_root
+from core.playwright_profile import get_primary_user_data_dir
 from core.task_model import DownloadTask
+from utils.headers import normalized_forward_headers
 from utils.logger import logger
+from utils.proxy_config import proxy_for_url
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +57,26 @@ COOKIE_DOMAIN_MAP: dict[str, str] = {
     'instagram.com': 'www.instagram.com',
     'www.instagram.com': 'www.instagram.com',
     '*.instagram.com': 'www.instagram.com',
+    # Common page/video sites where users may explicitly export cookies.
+    'vimeo.com': 'vimeo.com',
+    'www.vimeo.com': 'vimeo.com',
+    '*.vimeo.com': 'vimeo.com',
+    'dailymotion.com': 'www.dailymotion.com',
+    'www.dailymotion.com': 'www.dailymotion.com',
+    '*.dailymotion.com': 'www.dailymotion.com',
+    'twitch.tv': 'www.twitch.tv',
+    'www.twitch.tv': 'www.twitch.tv',
+    '*.twitch.tv': 'www.twitch.tv',
+    'facebook.com': 'www.facebook.com',
+    'www.facebook.com': 'www.facebook.com',
+    'fb.watch': 'www.facebook.com',
+    '*.facebook.com': 'www.facebook.com',
+    'douyin.com': 'www.douyin.com',
+    'www.douyin.com': 'www.douyin.com',
+    '*.douyin.com': 'www.douyin.com',
+    'kuaishou.com': 'www.kuaishou.com',
+    'www.kuaishou.com': 'www.kuaishou.com',
+    '*.kuaishou.com': 'www.kuaishou.com',
 }
 
 
@@ -206,7 +230,198 @@ class YtdlpEngine(BaseEngine):
         """获取 YouTube cookies 文件路径（向后兼容）"""
         import os
         return os.path.join(cls.get_cookies_base_path(), "www.youtube.com_cookies.txt")
-    
+
+    def _is_youtube_url(self, url: str) -> bool:
+        """Return True for YouTube / youtu.be URLs."""
+        host = ""
+        try:
+            host = urlparse(url).hostname or ""
+        except ValueError:
+            return False
+        host = host.lower()
+        return (
+            host == "youtu.be"
+            or host.endswith("youtube.com")
+            or host.endswith("youtube-nocookie.com")
+        )
+
+    @staticmethod
+    def _browser_cookie_sources() -> list[str]:
+        """Return browser-cookie sources ordered by reliability for retries."""
+        sources: list[str] = []
+        try:
+            profile = get_primary_user_data_dir()
+            if profile.exists():
+                sources.append(f"chromium:{profile}")
+        except (OSError, RuntimeError) as exc:
+            logger.debug(
+                f"[yt-dlp] Playwright Chromium profile 检测失败: {exc}",
+                event="ytdlp_chromium_profile_probe_failed",
+                stage="browser_cookie_sources",
+                error_type=type(exc).__name__,
+            )
+        sources.extend(["chrome", "firefox"])
+        deduped: list[str] = []
+        for source in sources:
+            if source and source not in deduped:
+                deduped.append(source)
+        return deduped
+
+    def _resolve_browser_cookie_source(self, use_browser_cookies) -> str:
+        """Map retry mode to a yt-dlp --cookies-from-browser source string."""
+        if not use_browser_cookies:
+            return ""
+        if isinstance(use_browser_cookies, str) and use_browser_cookies.startswith("chromium:"):
+            return use_browser_cookies
+        if use_browser_cookies == "chromium":
+            sources = self._browser_cookie_sources()
+            for source in sources:
+                if source.startswith("chromium:"):
+                    return source
+            return "chrome"
+        if use_browser_cookies == "firefox":
+            return "firefox"
+        if isinstance(use_browser_cookies, str):
+            return use_browser_cookies
+        return ""
+
+    def _build_browser_cookie_retry_plan(self) -> list[str]:
+        """Return retry cookie sources after removing duplicates."""
+        return self._browser_cookie_sources()
+
+    def _try_browser_cookie_retries(
+        self,
+        task: DownloadTask,
+        progress_callback,
+        *,
+        reason: str,
+        generic_impersonate: bool = False,
+    ) -> tuple[bool, bool]:
+        """Try yt-dlp with real browser cookies for bot/auth failures."""
+        need_login = False
+        task.headers.pop('_cookie_file', None)
+        for source in self._build_browser_cookie_retry_plan():
+            if self._should_stop(task):
+                self._mark_stopped(task)
+                return False, need_login
+            suffix = " + generic impersonate" if generic_impersonate else ""
+            logger.info(f"[yt-dlp] 尝试使用浏览器 cookies 作为备用: {source}{suffix} ({reason})")
+            success, source_need_login = self._do_download(
+                task,
+                progress_callback,
+                use_browser_cookies=source,
+                allow_insecure_tls=False,
+                generic_impersonate=generic_impersonate,
+            )
+            need_login = need_login or source_need_login
+            if success or self._should_stop(task):
+                if self._should_stop(task):
+                    self._mark_stopped(task)
+                return success, need_login
+        return False, need_login
+
+    def _append_browser_context_headers(
+        self,
+        cmd: list[str],
+        task: DownloadTask,
+        *,
+        include_cookie: bool,
+    ) -> None:
+        """Append sanitized browser-context headers to yt-dlp argv."""
+        safe = normalized_forward_headers(
+            task.headers,
+            include_cookie=include_cookie,
+            include_authorization=bool((task.headers or {}).get('_allow_authorization_header')),
+        )
+        if safe.get('user-agent'):
+            cmd.extend(['--user-agent', safe['user-agent']])
+        if safe.get('referer'):
+            cmd.extend(['--referer', safe['referer']])
+
+        for lower_key, header_name in (
+            ('origin', 'Origin'),
+            ('accept', 'Accept'),
+            ('accept-language', 'Accept-Language'),
+            ('sec-fetch-site', 'Sec-Fetch-Site'),
+            ('sec-fetch-mode', 'Sec-Fetch-Mode'),
+            ('sec-fetch-dest', 'Sec-Fetch-Dest'),
+            ('sec-ch-ua', 'Sec-Ch-Ua'),
+            ('sec-ch-ua-mobile', 'Sec-Ch-Ua-Mobile'),
+            ('sec-ch-ua-platform', 'Sec-Ch-Ua-Platform'),
+            ('authorization', 'Authorization'),
+        ):
+            value = safe.get(lower_key)
+            if value:
+                cmd.extend(['--add-header', f'{header_name}: {value}'])
+
+        cookie = safe.get('cookie')
+        if cookie and include_cookie and not self._is_youtube_url(task.url):
+            cmd.extend(['--add-header', f'Cookie: {cookie}'])
+
+    @classmethod
+    def _validate_cookie_file_path(cls, cookie_file: str) -> str:
+        """F-03: reject ``_cookie_file`` paths outside trusted roots.
+
+        A malicious ``m3u8dl://`` JSON payload can inject
+        ``headers._cookie_file`` with an arbitrary local path. Even
+        though the protocol handler now strips ``_``-prefixed keys and
+        CatCatch repeats the strip server-side, this final check at the
+        engine boundary ensures that if a value ever reaches
+        ``_build_command`` it is confined to:
+
+          * the app ``cookies/`` directory, OR
+          * the user's ``~/.m3u8d`` directory (portable profile root).
+
+        Both roots are realpath-compared against
+        ``os.path.realpath(cookie_file)`` so symlinks / ``..`` traversal
+        cannot escape. A rejected path is logged as
+        ``cookie_file_outside_trusted_root`` and the cookie file is
+        silently dropped (yt-dlp then falls back to its normal cookie
+        discovery flow).
+        """
+        if not cookie_file or not isinstance(cookie_file, str):
+            return ""
+        import os
+        from pathlib import Path
+
+        try:
+            candidate = Path(os.path.realpath(cookie_file))
+        except (OSError, ValueError):
+            logger.warning(
+                "[yt-dlp] cookie file path rejected (unresolvable)",
+                event="cookie_file_outside_trusted_root",
+                stage="build_command",
+            )
+            return ""
+
+        trusted_roots = []
+        for root_candidate in (
+            Path(cls.get_cookies_base_path()),
+            get_data_root() / "cookies",
+            Path.home() / ".m3u8d",
+        ):
+            try:
+                trusted_roots.append(root_candidate.resolve())
+            except (OSError, RuntimeError):
+                # A root may be unresolvable in frozen/test envs; skip it
+                # and keep the check fail-closed when no trusted root works.
+                pass
+
+        for root in trusted_roots:
+            try:
+                candidate.relative_to(root)
+                return str(candidate)
+            except ValueError:
+                continue
+
+        logger.warning(
+            "[yt-dlp] cookie file outside trusted root; dropping",
+            event="cookie_file_outside_trusted_root",
+            stage="build_command",
+            cookie_file=cookie_file,
+        )
+        return ""
+
     def can_handle(self, url: str) -> bool:
         """yt-dlp 是万能兜底，总是返回 True"""
         return True
@@ -215,14 +430,25 @@ class YtdlpEngine(BaseEngine):
         return "yt-dlp"
     
     def download(self, task: DownloadTask, progress_callback) -> bool:
-        """执行通用视频下载"""
+        """执行通用视频下载（含策略链增强回退）。
+
+        策略顺序:
+        1. 默认模式（cookie 文件或嗅探器 cookies）
+        2. 非 YouTube URL 有 Cookie header 时允许 --add-header Cookie
+        3. generic impersonate（浏览器伪装绕过 Cloudflare）
+        4. Playwright/Chrome/Firefox 浏览器 cookies
+        5. 证书错误时 --no-check-certificates（最后一次尝试）
+        """
         import os
-        
+
+        if not isinstance(task.headers, dict):
+            task.headers = {}
+
         # 根据 URL 查找对应的 cookies 文件
         cookies_file = self.get_cookies_file_for_url(task.url)
         has_cookies_file = cookies_file and os.path.exists(cookies_file)
         is_bilibili = 'bilibili.com' in (task.url or '').lower()
-        
+
         # 第一次尝试：使用手动导出的 cookies 文件（如果存在）
         if has_cookies_file:
             task.headers['_cookie_file'] = cookies_file
@@ -231,41 +457,70 @@ class YtdlpEngine(BaseEngine):
         if self._should_stop(task):
             self._mark_stopped(task)
             return False
-        
+
         success, need_login = self._do_download(
             task,
             progress_callback,
             use_browser_cookies=None,
-            allow_insecure_tls=False
+            allow_insecure_tls=False,
         )
-        
+
         if success or self._should_stop(task):
             if self._should_stop(task):
                 self._mark_stopped(task)
             return success
-        
+
         # Bilibili 某些视频在未登录时不会直接提示 sign in，而是返回 No video formats found
-        # 但使用浏览器 cookies 可以正常拿到格式，因此这里做一次站点定向降级重试。
-        if is_bilibili and not has_cookies_file:
-            if self._should_stop(task):
-                self._mark_stopped(task)
-                return False
+        # 但使用浏览器 cookies 可以正常拿到格式。M6 起仅在失败文本符合登录态/空格式类
+        # 可恢复场景时重试，避免 DRM/地区/已下架等终态错误盲目启动浏览器 cookie 子进程。
+        if (
+            is_bilibili
+            and not has_cookies_file
+            and self._should_try_browser_cookie_retry(task.error_message or "", task.url)
+        ):
             logger.warning("[yt-dlp] Bilibili 无 cookies 首次下载失败，怀疑为登录态/站点限制导致的空格式")
-            logger.info("[yt-dlp] 尝试使用 Firefox cookies 作为 Bilibili 备用认证...")
-            success, _ = self._do_download(
+            success, browser_need_login = self._try_browser_cookie_retries(
                 task,
                 progress_callback,
-                use_browser_cookies='firefox',
-                allow_insecure_tls=False
+                reason="bilibili_login_or_empty_formats",
             )
+            need_login = need_login or browser_need_login
             if success or self._should_stop(task):
                 if self._should_stop(task):
                     self._mark_stopped(task)
                 return success
-            logger.warning("[yt-dlp] Firefox cookies 备用认证仍失败，问题更可能是 yt-dlp/Bilibili 站点变更或账号权限限制")
-        
-        # 如果需要登录
-        if need_login:
+            logger.warning("[yt-dlp] 浏览器 cookies 备用认证仍失败，问题更可能是 yt-dlp/Bilibili 站点变更或账号权限限制")
+
+        # 非 YouTube 且有 Cookie header：首次命令已传 Cookie header。
+        if task.headers.get('cookie') and not self._is_youtube_url(task.url):
+            pass
+
+        # Generic impersonate fallback: only use a browser-like fingerprint
+        # for failures that commonly benefit from it (bot checks, Cloudflare,
+        # hotlink 403, or empty formats). Avoid blind retries for DRM/geo or
+        # plainly unsupported URLs.
+        generic_failed_for_browser_state = False
+        if not self._should_stop(task) and self._should_try_generic_impersonate(task.error_message or ""):
+            logger.info("[yt-dlp] 尝试 generic impersonate 浏览器伪装...")
+            success, generic_need_login = self._do_download(
+                task,
+                progress_callback,
+                use_browser_cookies=None,
+                allow_insecure_tls=False,
+                generic_impersonate=True,
+            )
+            need_login = need_login or generic_need_login
+            if success or self._should_stop(task):
+                if self._should_stop(task):
+                    self._mark_stopped(task)
+                return success
+            generic_failed_for_browser_state = self._should_try_browser_cookie_retry(
+                task.error_message or "",
+                task.url,
+            )
+
+        # 如果需要登录，或失败文本符合可由真实浏览器 cookies 恢复的页面类问题。
+        if need_login or generic_failed_for_browser_state or self._should_try_browser_cookie_retry(task.error_message or "", task.url):
             if has_cookies_file:
                 # cookies 文件存在但可能已过期
                 cookies_filename = os.path.basename(cookies_file)
@@ -283,28 +538,24 @@ class YtdlpEngine(BaseEngine):
                     except Exception as e:
                         logger.debug(f"[yt-dlp] 站点域名推断失败: url={task.url} error={e}")
                         expected_file = "对应网站的 cookies 文件"
-                
-                logger.warning(f"[yt-dlp] ⚠️ 需要登录但未找到 cookies 文件！")
-                logger.warning(f"[yt-dlp] 💡 请导出 {expected_file} 并放到程序目录")
-            
-            if self._should_stop(task):
-                self._mark_stopped(task)
-                return False
-            # 回退到 Firefox cookies
-            logger.info(f"[yt-dlp] 尝试使用 Firefox cookies 作为备用...")
-            # 清除可能失效的 cookie 文件路径
-            task.headers.pop('_cookie_file', None)
-            success, _ = self._do_download(
+
+                logger.warning(f"[yt-dlp] ⚠️ 需要登录/浏览器验证但未找到可用 cookies 文件！")
+                logger.warning(f"[yt-dlp] 💡 请先在内置浏览器或系统浏览器完成验证，或导出 {expected_file}")
+
+            need_impersonate_for_cookie = generic_failed_for_browser_state or self._should_try_generic_impersonate(
+                task.error_message or ""
+            )
+            success, _ = self._try_browser_cookie_retries(
                 task,
                 progress_callback,
-                use_browser_cookies='firefox',
-                allow_insecure_tls=False
+                reason="auth_or_bot_check",
+                generic_impersonate=need_impersonate_for_cookie,
             )
             if self._should_stop(task):
                 self._mark_stopped(task)
                 return False
             return success
-        
+
         return False
     
     def _do_download(
@@ -312,12 +563,14 @@ class YtdlpEngine(BaseEngine):
         task: DownloadTask,
         progress_callback,
         use_browser_cookies=None,
-        allow_insecure_tls: bool = False
+        allow_insecure_tls: bool = False,
+        generic_impersonate: bool = False,
     ) -> tuple:
         """
         执行下载
         Args:
             use_browser_cookies: None=只用任务自带cookies, 'chromium'=使用Chromium, 'firefox'=使用Firefox
+            generic_impersonate: True 时启用 yt-dlp 浏览器伪装绕过 Cloudflare 等反爬
         Returns: (success: bool, need_login: bool)
         """
         output_lines: list[str] = []
@@ -329,7 +582,8 @@ class YtdlpEngine(BaseEngine):
             cmd = self._build_command(
                 task,
                 use_browser_cookies=use_browser_cookies,
-                allow_insecure_tls=allow_insecure_tls
+                allow_insecure_tls=allow_insecure_tls,
+                generic_impersonate=generic_impersonate,
             )
             
             # 日志显示使用的 cookie 来源
@@ -354,7 +608,12 @@ class YtdlpEngine(BaseEngine):
             # regardless of tag.
             process = self.spawn(cmd, sensitive=False)
 
-            task.process = process
+            # ISS-30: bind process ownership metadata atomically so manager
+            # kill paths can guard against pid reuse.
+            with task.lock:
+                task.process = process
+                task._pid = getattr(process, "pid", None)
+                task._expected_engine_name = self.get_name()
 
             # ``read_loop`` drives PIPE draining, stop-request handling, and
             # the terminate→kill escalation. ``_parse_line`` accumulates
@@ -378,14 +637,20 @@ class YtdlpEngine(BaseEngine):
             returncode = result.returncode
             success = result.status == "ok"
 
-            # 检测是否需要登录
-            need_login = False
+            # 检测是否需要登录/浏览器态重试。部分站点（尤其 YouTube/Bilibili）
+            # 会用 bot-check、403 或空格式替代直白的 login required 文案。
             full_output = '\n'.join(output_lines).lower()
-            login_keywords = ['sign in', 'login', 'private video', 'members-only', 'subscriber', 'age-restricted']
-            if not success and any(kw in full_output for kw in login_keywords):
-                need_login = True
+            need_login = (not success) and self._is_login_required_failure(full_output)
 
             if (not success) and (not allow_insecure_tls) and self._is_certificate_error(full_output):
+                # ISS-17: 重试前检查 stop 信号，避免在任务已被停止后仍
+                # spawn 新子进程，造成进程泄漏与资源浪费。
+                if self._should_stop(task):
+                    self._mark_stopped(task)
+                    return False, False
+                # 清理上一次尝试残留的 process 引用（进程已由
+                # read_loop 终止并关闭管道），避免下游代码误判存活状态。
+                task.process = None
                 logger.warning("[yt-dlp] 检测到证书校验失败，自动启用 --no-check-certificates 重试一次")
                 return self._do_download(
                     task,
@@ -438,15 +703,19 @@ class YtdlpEngine(BaseEngine):
         self,
         task: DownloadTask,
         use_browser_cookies=None,
-        allow_insecure_tls: bool = False
+        allow_insecure_tls: bool = False,
+        generic_impersonate: bool = False,
     ) -> list:
         """构建下载命令
         
         Args:
             use_browser_cookies: None=不使用浏览器cookies, 'chromium'=使用Chromium, 'firefox'=使用Firefox
+            generic_impersonate: True 时拼装 yt-dlp 浏览器伪装参数
+                (``--extractor-args generic:impersonate``)，用于绕过 Cloudflare 等
+                基于浏览器指纹的防护；该场景下还会以 ``--add-header`` 形式补传
+                Origin / Cookie，恢复 ISS-02 中被删除的 Cloudflare 绕过能力。
         """
         from utils.config_manager import config
-        import os
         
         # 从 URL 末尾的 fragment 中提取内部格式选择标记（如果有）
         # 这里只认程序自己附加的 `#format=`，避免把站点原本合法的 fragment 误当作内部参数。
@@ -487,23 +756,10 @@ class YtdlpEngine(BaseEngine):
             '--merge-output-format', 'mp4',
         ]
         
-        # 使用浏览器 cookies（需要浏览器关闭或支持读取）
-        if use_browser_cookies == 'chromium':
-            # 使用 Playwright 的 Chromium 用户数据目录
-            chromium_data_dir = os.path.join(
-                os.environ.get('APPDATA', ''),
-                'M3U8VideoSniffer',
-                'chromium_user_data'
-            )
-            if os.path.exists(chromium_data_dir):
-                cmd.extend(['--cookies-from-browser', f'chromium:{chromium_data_dir}'])
-                logger.info(f"[yt-dlp] 尝试使用 Chromium cookies: {chromium_data_dir}")
-            else:
-                # 回退到默认 Chrome
-                cmd.extend(['--cookies-from-browser', 'chrome'])
-                logger.info("[yt-dlp] 尝试使用系统 Chrome cookies")
-        elif use_browser_cookies == 'firefox':
-            cmd.extend(['--cookies-from-browser', 'firefox'])
+        browser_cookie_source = self._resolve_browser_cookie_source(use_browser_cookies)
+        if browser_cookie_source:
+            cmd.extend(['--cookies-from-browser', browser_cookie_source])
+            logger.info(f"[yt-dlp] 尝试使用浏览器 cookies: {browser_cookie_source}")
         
         # 指定格式
         if format_id:
@@ -520,29 +776,79 @@ class YtdlpEngine(BaseEngine):
             cmd.extend(['--limit-rate', f'{speed_limit}M'])
             logger.info(f"[yt-dlp] 限速: {speed_limit}M/s")
         
-        # 添加请求头（仅在不使用浏览器 cookies 时）
-        if not use_browser_cookies:
-            if task.headers.get('user-agent'):
-                cmd.extend(['--user-agent', task.headers['user-agent']])
-            
-            if task.headers.get('referer'):
-                cmd.extend(['--referer', task.headers['referer']])
-            
-            # 对于 YouTube，--add-header Cookie 方式效果不佳，跳过
-            # if task.headers.get('cookie'):
-            #     cmd.extend(['--add-header', f'Cookie: {task.headers["cookie"]}'])
+        # 添加请求头：即使用浏览器 cookies，也保留 Referer/Origin/UA 等
+        # 浏览器上下文；Cookie header 仅在不使用 --cookies-from-browser 时透传，
+        # 避免与 yt-dlp 自己的 cookie jar 合并策略冲突。
+        self._append_browser_context_headers(
+            cmd,
+            task,
+            include_cookie=not bool(browser_cookie_source),
+        )
         
         # 使用 cookie 文件（从浏览器导出的）
+        # F-03: validate the resolved path stays inside a trusted root
+        # (the app ``cookies/`` dir or ``~/.m3u8d``) so a malicious
+        # ``_cookie_file`` injected via the protocol-handler JSON path
+        # cannot point yt-dlp's ``--cookies`` at an arbitrary local
+        # file (e.g. C:\Windows\System32\config\SAM).
         if task.headers.get('_cookie_file'):
             cookie_file = task.headers['_cookie_file']
-            if os.path.exists(cookie_file):
+            cookie_file = self._validate_cookie_file_path(cookie_file)
+            if cookie_file and os.path.exists(cookie_file):
                 cmd.extend(['--cookies', cookie_file])
                 logger.info(f"[yt-dlp] 使用导出的 cookies: {cookie_file}")
 
+        # Cloudflare 等基于浏览器指纹的防护绕过（ISS-02 恢复）：
+        # ``--extractor-args generic:impersonate`` 让 yt-dlp 用真实浏览器
+        # 指纹发起请求。该场景下 Origin / Cookie 必须随请求头带上去，否则
+        # 站点会因鉴权/防盗链缺失而拒绝；此分支独立于默认的 YouTube cookie
+        # 跳过逻辑，避免影响既有认证流程。
+        if generic_impersonate:
+            cmd.extend(['--extractor-args', 'generic:impersonate'])
+
         if allow_insecure_tls:
             cmd.append('--no-check-certificates')
-        
+
+        proxy = proxy_for_url(url)
+        if proxy:
+            cmd.extend(['--proxy', proxy])
+
         return cmd
+
+    def _is_login_required_failure(self, output_text: str) -> bool:
+        """Return True when a failed run is likely recoverable by browser cookies."""
+        if not output_text:
+            return False
+        text = output_text.lower()
+        login_or_auth_keywords = (
+            "sign in",
+            "login",
+            "log in",
+            "please log in",
+            "authentication required",
+            "requires authentication",
+            "account required",
+            "private video",
+            "members-only",
+            "members only",
+            "subscriber",
+            "age-restricted",
+            "cookies are required",
+            "cookie is required",
+            "http error 401",
+            "unauthorized",
+            "http error 403",
+            "forbidden",
+            "confirm you're not a bot",
+            "confirm you’re not a bot",
+            "not a bot",
+            "automated requests",
+            "unusual traffic",
+            "captcha",
+            "no video formats",
+            "no formats found",
+        )
+        return any(keyword in text for keyword in login_or_auth_keywords)
 
     def _is_certificate_error(self, output_text: str) -> bool:
         if not output_text:
@@ -553,6 +859,93 @@ class YtdlpEngine(BaseEngine):
             or "unable to get local issuer certificate" in text
             or "[ssl: certificate_verify_failed]" in text
         )
+
+    @staticmethod
+    def _is_terminal_non_retryable_failure(output_text: str) -> bool:
+        """Return True when yt-dlp output indicates retries are unlikely to help."""
+        text = (output_text or "").lower()
+        terminal_keywords = (
+            "drm",
+            "widevine",
+            "license server",
+            "protected by drm",
+            "not available in your country",
+            "blocked in your country",
+            "not available from your location",
+            "region restriction",
+            "country restriction",
+            "unsupported url",
+            "no suitable extractor",
+            "this video has been removed",
+            "video has been removed",
+            "copyright claim",
+            "not available anymore",
+            "livestream has ended",
+            "premiere has not begun",
+        )
+        return any(keyword in text for keyword in terminal_keywords)
+
+    def _should_try_generic_impersonate(self, output_text: str) -> bool:
+        """Return True when browser fingerprint impersonation is a useful fallback."""
+        text = (output_text or "").lower()
+        if not text or self._is_terminal_non_retryable_failure(text):
+            return False
+        impersonate_keywords = (
+            "confirm you're not a bot",
+            "confirm you’re not a bot",
+            "not a bot",
+            "automated requests",
+            "unusual traffic",
+            "captcha",
+            "checking your browser",
+            "cloudflare",
+            "ddos-guard",
+            "akamai",
+            "403",
+            "http error 403",
+            "forbidden",
+            "no video formats",
+            "no formats found",
+            "requested format is not available",
+        )
+        return any(keyword in text for keyword in impersonate_keywords)
+
+    def _should_try_browser_cookie_retry(self, output_text: str, url: str = "") -> bool:
+        """Return True when browser cookies may recover a page-class failure."""
+        text = (output_text or "").lower()
+        if not text or self._is_terminal_non_retryable_failure(text):
+            return False
+        if "bilibili.com" in (url or "").lower() and any(
+            keyword in text for keyword in ("no video formats", "no formats found", "requested format")
+        ):
+            return True
+        cookie_keywords = (
+            "sign in",
+            "login",
+            "log in",
+            "please log in",
+            "authentication required",
+            "requires authentication",
+            "account required",
+            "private video",
+            "members-only",
+            "members only",
+            "subscriber",
+            "age-restricted",
+            "cookies are required",
+            "cookie is required",
+            "http error 401",
+            "unauthorized",
+            "confirm you're not a bot",
+            "confirm you’re not a bot",
+            "no video formats",
+            "no formats found",
+        )
+        return any(keyword in text for keyword in cookie_keywords)
+
+    def _should_retry_formats_with_browser_cookies(self, output_text: str, url: str = "") -> bool:
+        """Return True when format probing should retry with browser cookies."""
+        return self._should_try_browser_cookie_retry(output_text, url) or self._should_try_generic_impersonate(output_text)
     
     def _diagnose_failure(self, output_text: str) -> tuple:
         """根据输出日志推断失败原因并给出建议"""
@@ -563,30 +956,127 @@ class YtdlpEngine(BaseEngine):
         suggestions = []
         reason = ""
 
-        if "403" in text or "http error 403" in text or "forbidden" in text:
+        if "429" in text or "too many requests" in text or "rate limit" in text or "http error 429" in text:
+            reason = "429/限流（请求过快或站点临时限制）"
+            suggestions.extend(["稍后重试", "降低并发/限速", "必要时更换网络出口"])
+        elif any(keyword in text for keyword in ("drm", "widevine", "license server", "protected by drm", "copyright protection")):
+            reason = "DRM/加密授权限制"
+            suggestions.extend(["该内容可能不支持下载", "确认资源是否需要官方客户端播放"])
+        elif any(keyword in text for keyword in (
+            "confirm you're not a bot",
+            "confirm you’re not a bot",
+            "not a bot",
+            "automated requests",
+            "unusual traffic",
+            "captcha",
+            "checking your browser",
+            "cloudflare",
+            "ddos-guard",
+            "checking if the site connection is secure",
+        )):
+            reason = "反爬/机器人校验（需要真实浏览器态）"
+            suggestions.extend(["使用浏览器 cookies 重试", "更新 yt-dlp", "必要时在浏览器中完成验证后重新嗅探"])
+        elif any(keyword in text for keyword in (
+            "401",
+            "http error 401",
+            "unauthorized",
+            "sign in",
+            "login required",
+            "please log in",
+            "authentication required",
+            "private video",
+            "members-only",
+            "members only",
+            "subscriber",
+            "age-restricted",
+            "cookies are required",
+            "cookie is required",
+            "join this channel",
+            "paid content",
+        )):
+            reason = "需要登录/账号权限不足"
+            suggestions.extend(["导出并配置 cookies", "尝试使用浏览器 cookies", "确认账号具备观看权限"])
+        elif "403" in text or "http error 403" in text or "forbidden" in text:
             reason = "403/Forbidden（可能鉴权/防盗链）"
             suggestions.extend(["检查 Referer/UA 是否正确", "导出并配置 cookies", "尝试使用浏览器 cookies"])
-        elif "401" in text or "http error 401" in text or "unauthorized" in text:
-            reason = "401/Unauthorized（需要登录）"
-            suggestions.extend(["导出 cookies 并放入 cookies 目录", "尝试使用浏览器 cookies"])
-        elif "geo" in text or "not available in your country" in text or "blocked in your country" in text:
+        elif any(keyword in text for keyword in (
+            "geo",
+            "not available in your country",
+            "blocked in your country",
+            "not available from your location",
+            "region restriction",
+            "country restriction",
+            "geo-restricted",
+            "geo restricted",
+        )):
             reason = "地理限制/地区不可用"
             suggestions.extend(["使用代理/VPN", "更换节点后重试"])
-        elif "signature" in text or "nsig" in text or "signature extraction" in text:
-            reason = "签名/解析失败（可能需要更新 yt-dlp）"
-            suggestions.extend(["更新 yt-dlp 到最新版本", "稍后重试"])
-        elif "private video" in text or "members-only" in text or "subscriber" in text:
-            reason = "访问权限受限"
-            suggestions.extend(["确认账号有权限", "使用已登录的 cookies"])
-        elif "timed out" in text or "timeout" in text or "connection reset" in text:
+        elif any(keyword in text for keyword in (
+            "signature extraction",
+            "nsig",
+            "n-sig",
+            "player response",
+            "signature cipher",
+            "unable to extract uploader id",
+            "unable to extract initial player response",
+        )):
+            reason = "签名/播放器解析失败（可能需要更新 yt-dlp）"
+            suggestions.extend(["更新 yt-dlp 到最新版本", "稍后重试", "尝试使用浏览器 cookies"])
+        elif any(keyword in text for keyword in (
+            "extractor error",
+            "unable to extract",
+            "please report this issue",
+            "make sure you are using the latest version",
+            "this version of yt-dlp is outdated",
+            "update to the latest version",
+            "unsupported url",
+            "no suitable extractor",
+        )):
+            reason = "站点解析器失效或 yt-dlp 版本过旧"
+            suggestions.extend(["更新 yt-dlp", "确认链接为视频详情页", "等待上游适配站点变更"])
+        elif any(keyword in text for keyword in (
+            "no video formats",
+            "no formats found",
+            "requested format is not available",
+            "this video is unavailable",
+            "video unavailable",
+            "selected format is not available",
+        )):
+            reason = "无法解析可下载格式（可能登录态不足或资源不可用）"
+            suggestions.extend(["使用浏览器 cookies 重试", "切换引擎/格式", "检查链接是否仍可播放"])
+        elif any(keyword in text for keyword in (
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection aborted",
+            "remote end closed",
+            "temporarily unavailable",
+            "temporary failure in name resolution",
+            "incomplete read",
+            "read timed out",
+        )):
             reason = "网络超时或连接被重置"
             suggestions.extend(["降低并发/限速", "检查网络稳定性", "稍后重试"])
-        elif "certificate_verify_failed" in text or "unable to get local issuer certificate" in text:
-            reason = "SSL 证书校验失败"
+        elif any(keyword in text for keyword in (
+            "certificate_verify_failed",
+            "unable to get local issuer certificate",
+            "ssl: certificate",
+            "tlsv1 alert",
+        )):
+            reason = "SSL/TLS 证书校验失败"
             suggestions.extend(["检查系统证书链", "允许引擎在失败时自动禁用证书校验重试"])
-        elif "unable to download" in text or "no video formats" in text:
-            reason = "无法解析视频格式"
-            suggestions.extend(["尝试切换引擎", "检查链接是否为有效页面"])
+        elif any(keyword in text for keyword in (
+            "this video has been removed",
+            "video has been removed",
+            "not available anymore",
+            "livestream has ended",
+            "premiere has not begun",
+        )):
+            reason = "资源已失效或直播尚不可用"
+            suggestions.extend(["确认链接仍可播放", "刷新页面重新嗅探", "稍后重试"])
+        elif "unable to download" in text:
+            reason = "下载阶段失败"
+            suggestions.extend(["检查网络与站点可访问性", "尝试切换引擎", "保留失败日志用于定位"])
 
         return reason, suggestions
 
@@ -644,18 +1134,28 @@ class YtdlpEngine(BaseEngine):
                 error_output = result.stderr or result.stdout or ''
                 error_msg = error_output[:500]
                 logger.error(f"[yt-dlp] 获取格式失败: {error_msg}")
+                reason, suggestions = self._diagnose_failure(error_output)
+                if reason:
+                    logger.warning(f"[yt-dlp] 获取格式失败原因: {reason}")
+                if suggestions:
+                    logger.warning("[yt-dlp] 获取格式建议: " + "；".join(suggestions))
                 
                 # 如果使用了 cookie 文件但失败，提示可能过期
-                if cookie_file and ('sign in' in error_output.lower() or 'login' in error_output.lower()):
+                if cookie_file and self._is_login_required_failure(error_output):
                     logger.warning("[yt-dlp] ⚠️ cookies 可能已过期，请重新导出对应站点的 cookies 文件")
                 
-                # Bilibili 常见场景：未登录时不明确报登录，而是直接空格式；此时自动回退浏览器 cookies
-                if (not use_browser_cookies) and ('bilibili.com' in (url or '').lower()):
+                # Bilibili 常见场景：未登录时不明确报登录，而是直接空格式；
+                # 仅在诊断链路认为 cookies/浏览器态可能恢复时回退，跳过 DRM/地区/已下架终态失败。
+                if (
+                    (not use_browser_cookies)
+                    and ('bilibili.com' in (url or '').lower())
+                    and self._should_retry_formats_with_browser_cookies(error_output, url)
+                ):
                     logger.info("[yt-dlp] Bilibili 获取格式失败，尝试使用 Firefox cookies 重试...")
                     return self.get_formats(url, None, use_browser_cookies=True)
                 
-                # 失败时尝试用 Firefox cookies 重试
-                if not use_browser_cookies:
+                # 仅对登录态/反爬/空格式类失败尝试 Firefox cookies，避免 DRM/地区/过期资源盲试。
+                if (not use_browser_cookies) and self._should_retry_formats_with_browser_cookies(error_output, url):
                     return self.get_formats(url, None, use_browser_cookies=True)
                 return []
             
@@ -712,9 +1212,6 @@ class YtdlpEngine(BaseEngine):
             
         except subprocess.TimeoutExpired:
             logger.error("[yt-dlp] 获取格式超时")
-            # 超时时也尝试用 cookies 重试
-            if not use_browser_cookies and not cookie:
-                return self.get_formats(url, None, use_browser_cookies=True)
             return []
         except json.JSONDecodeError as e:
             logger.error(f"[yt-dlp] JSON 解析失败: {e}")

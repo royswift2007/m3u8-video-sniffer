@@ -1,3 +1,3 @@
 @echo off
-cd /d "%~dp0"
-python utils/cache_cleaner.py
+cd /d "%~dp0.."
+python -m utils.cache_cleaner

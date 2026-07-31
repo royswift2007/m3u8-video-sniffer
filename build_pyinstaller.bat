@@ -1,20 +1,19 @@
 @echo off
 setlocal EnableExtensions
-chcp 65001 >nul
 
 set "ROOT_DIR=%~dp0"
 for %%I in ("%ROOT_DIR%") do set "ROOT_DIR=%%~fI"
 set "BUILD_SCRIPT=%ROOT_DIR%build_pyinstaller.py"
 
 echo ============================================
-echo   M3U8D PyInstaller æž„å»ºè„šæœ¬
+echo   M3U8D PyInstaller ¹¹½¨½Å±¾
 echo ============================================
 echo [INFO] ROOT: %ROOT_DIR%
 echo [INFO] OUTPUT: %ROOT_DIR%dist\M3U8D
 echo.
 
 if not exist "%BUILD_SCRIPT%" (
-    echo [ERROR] æœªæ‰¾åˆ°æž„å»ºå…¥å£: "%BUILD_SCRIPT%"
+    echo [ERROR] Î´ÕÒµ½¹¹½¨Èë¿Ú: "%BUILD_SCRIPT%"
     endlocal & exit /b 1
 )
 
@@ -34,8 +33,8 @@ if not errorlevel 1 goto :run_with_py_launcher
 where python >nul 2>nul
 if not errorlevel 1 goto :run_with_python_path
 
-echo [ERROR] æœªæ‰¾åˆ°å¯ç”¨çš„ Python è§£é‡Šå™¨ã€‚
-echo [ERROR] è¯·å…ˆå®‰è£… Python / PyInstallerï¼Œæˆ–è®¾ç½® M3U8D_PYTHON çŽ¯å¢ƒå˜é‡åŽé‡è¯•ã€‚
+echo [ERROR] Î´ÕÒµ½¿ÉÓÃµÄ Python ½âÊÍÆ÷¡£
+echo [ERROR] ÇëÏÈ°²×° Python / PyInstaller£¬»òÉèÖÃ M3U8D_PYTHON »·¾³±äÁ¿ºóÖØÊÔ¡£
 endlocal & exit /b 1
 
 :run_with_python_exe

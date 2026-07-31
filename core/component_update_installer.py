@@ -12,6 +12,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import re
 import shutil
 import time
 from dataclasses import asdict, dataclass
@@ -766,14 +767,19 @@ class ComponentUpdateInstaller:
 
         1. Byte-for-byte equality after trimming whitespace and a leading
            ``v``/``V`` prefix.
-        2. Dotted prefix match — ``installed`` begins with
+        2. Explicit prerelease/test suffixes (``-beta`` / ``-rc`` /
+           ``-alpha`` / ``-preview`` / ``-test`` / ``-dev``) must match
+           exactly. This prevents a staged ``0.6.0-beta`` executable from
+           satisfying an expected stable ``0.6.0`` post-check merely because
+           it has the same numeric prefix.
+        3. Dotted prefix match — ``installed`` begins with
            ``expected + <separator>`` where the separator is one of
            ``" .-_+"``. This catches the FFmpeg case described above.
-        3. Dotted prefix match the other way — ``expected`` begins with
+        4. Dotted prefix match the other way — ``expected`` begins with
            ``installed + <separator>`` (useful when the manifest carries
            a longer string than the binary reports).
 
-        All three rules only fire when both strings have been stripped of
+        All rules only fire when both strings have been stripped of
         whitespace and a ``v``/``V`` prefix so the rest of the installer
         still controls the canonical form.
         """
@@ -784,12 +790,27 @@ class ComponentUpdateInstaller:
             return False
         if a == b:
             return True
+        if (
+            ComponentUpdateInstaller._explicit_prerelease_tag(a) is not None
+            or ComponentUpdateInstaller._explicit_prerelease_tag(b) is not None
+        ):
+            return False
         separators = (" ", ".", "-", "_", "+")
         if a.startswith(b) and a[len(b):][:1] in separators:
             return True
         if b.startswith(a) and b[len(a):][:1] in separators:
             return True
         return False
+
+    @staticmethod
+    def _explicit_prerelease_tag(version: str) -> str | None:
+        """Return an explicit prerelease/test tag for SemVer-like versions."""
+        match = re.match(
+            r"^\d+(?:\.\d+){1,3}-(alpha|beta|rc|pre|preview|dev|test)(?:[.\-_+\dA-Za-z]*)?$",
+            version.strip().lstrip("vV"),
+            flags=re.IGNORECASE,
+        )
+        return match.group(1).lower() if match else None
 
     @staticmethod
     def _success_with_warning(entry: DependencyEntry, target_path: Path, warning: str, new_version: str | None = None) -> ComponentInstallResult:

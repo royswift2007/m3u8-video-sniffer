@@ -47,7 +47,16 @@ class M3U8Resource:
     timestamp: datetime = field(default_factory=datetime.now)
     title: str = ""
     page_title: str = ""
+    source: str = "unknown"
+    resource_type: str = "unknown"
+    mime: str = ""
+    master_url: Optional[str] = None
+    media_url: Optional[str] = None
     variants: list = field(default_factory=list)
+    variants_parse_attempted: bool = False
+    variants_parse_failed: bool = False
+    variants_parse_in_progress: bool = False
+    variants_parse_url: str = ""
     is_variant: bool = False
     variant_info: Optional[dict] = None
     variant_parent_resource: Optional["M3U8Resource"] = None
@@ -55,9 +64,27 @@ class M3U8Resource:
     variants_listed: bool = False
     candidate_score: int = 0
     selected_engine: Optional[str] = None
+    temporary_cookie_allowed: bool = False
+    cookie_policy_source: str = ""
+    auth_policy_source: str = ""
+    is_suppressed: bool = False
+    suppression_reason: str = ""
+    segment_group_key: str = ""
+    segment_group_count: int = 0
+    playlist_diagnostics: dict = field(default_factory=dict)
+    detected_at: float = field(default_factory=time.time)
+    expires_at: Optional[float] = None
+    ephemeral_url: bool = False
+    ttl_warning: bool = False
 
     def __post_init__(self):
         self.page_title = self._sanitize_title(self.page_title)
+        # Normalise context fields introduced by download-context unification.
+        from core.download_context import normalize_source, infer_resource_type, RESOURCE_TYPE_UNKNOWN
+        self.source = normalize_source(self.source)
+        self.mime = (self.mime or "").strip().lower()
+        if not self.resource_type or self.resource_type == RESOURCE_TYPE_UNKNOWN:
+            self.resource_type = infer_resource_type(self.url, mime=self.mime, headers=self.headers)
         # `title` participates in Windows path construction (via
         # DownloadTask.filename), so run it through the strong, reserved-name
         # and byte-budget aware sanitizer from utils.win_path. An idempotency
@@ -222,10 +249,25 @@ class DownloadTask:
     engine: str = ""
     error_message: str = ""
     downloaded_size: str = ""
+    progress_attempt: int = 0
+    progress_source_label: str = ""
+    page_url: str = ""
+    page_title: str = ""
+    source: str = "unknown"
+    resource_type: str = "unknown"
+    mime: str = ""
     selected_variant: Optional[dict] = None
     master_url: Optional[str] = None
     media_url: Optional[str] = None
     candidate_scores: Optional[dict] = None
+    temporary_cookie_allowed: bool = False
+    cookie_policy_source: str = ""
+    auth_policy_source: str = ""
+    playlist_diagnostics: dict = field(default_factory=dict)
+    detected_at: float = field(default_factory=time.time)
+    expires_at: Optional[float] = None
+    ephemeral_url: bool = False
+    ttl_warning: bool = False
     process: Optional[object] = None
     retry_count: int = 0
     max_retries: int = 0
@@ -234,6 +276,7 @@ class DownloadTask:
     created_at: datetime = field(default_factory=datetime.now)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    lock: threading.RLock = field(init=False, repr=False, compare=False)
 
     # ------------------------------------------------------------------
     # Engine pid-ownership metadata (security-stability-hardening R30.1,
@@ -290,6 +333,12 @@ class DownloadTask:
     # __slots__) so call-sites can grep the canonical list.
     _LOCKED_FIELDS: ClassVar[tuple[str, ...]] = (
         "status",
+        "progress",
+        "speed",
+        "downloaded_size",
+        "progress_attempt",
+        "progress_source_label",
+        "engine",
         "stop_requested",
         "stop_reason",
         "process",
@@ -304,6 +353,13 @@ class DownloadTask:
         # ``object.__setattr__`` so that future migration to
         # ``@dataclass(frozen=True)`` stays straightforward.
         object.__setattr__(self, "lock", threading.RLock())
+
+        # Normalise context fields introduced by download-context unification.
+        from core.download_context import normalize_source, infer_resource_type, RESOURCE_TYPE_UNKNOWN
+        self.source = normalize_source(self.source)
+        self.mime = (self.mime or "").strip().lower()
+        if not self.resource_type or self.resource_type == RESOURCE_TYPE_UNKNOWN:
+            self.resource_type = infer_resource_type(self.url, mime=self.mime, headers=self.headers)
 
     # --- Locked helpers -----------------------------------------------------
 
@@ -328,6 +384,94 @@ class DownloadTask:
         with self.lock:
             for key, value in fields.items():
                 object.__setattr__(self, key, value)
+
+    def update_progress_locked(
+        self,
+        data: dict[str, Any],
+        *,
+        retry_attempt: int | None = None,
+    ) -> tuple[float, str, str, int, str, float]:
+        """Atomically merge a progress payload into volatile progress fields.
+
+        The merge is attempt/source aware: progress is monotonic within the
+        same ``(attempt, source_label)`` scope, but a new attempt or fallback
+        source may reset the visible percentage. Returns the normalized
+        ``(progress, speed, downloaded, attempt, source_label, previous_progress)``
+        tuple so callers can use exactly the stored values for snapshot
+        throttling and telemetry.
+        """
+
+        with self.lock:
+            try:
+                current_progress = float(self.progress or 0.0)
+            except (TypeError, ValueError):
+                current_progress = 0.0
+            current_speed = self.speed or ""
+            current_downloaded = self.downloaded_size or ""
+            try:
+                stored_attempt = max(0, int(getattr(self, "progress_attempt", 0) or 0))
+            except (TypeError, ValueError):
+                stored_attempt = 0
+            if retry_attempt is None:
+                try:
+                    retry_attempt_value = max(0, int(self.retry_count or 0))
+                except (TypeError, ValueError):
+                    retry_attempt_value = stored_attempt
+            else:
+                try:
+                    retry_attempt_value = max(0, int(retry_attempt or 0))
+                except (TypeError, ValueError):
+                    retry_attempt_value = stored_attempt
+            current_source_label = str(getattr(self, "progress_source_label", "") or "").strip()
+
+            raw_progress = data.get("progress", current_progress)
+            try:
+                progress_value = float(raw_progress)
+            except (TypeError, ValueError):
+                progress_value = current_progress
+            progress_value = max(-1.0, min(100.0, progress_value))
+
+            speed_value = str(data.get("speed", current_speed) or "")
+            downloaded_value = str(data.get("downloaded", current_downloaded) or "")
+
+            if "attempt" in data:
+                raw_attempt = data.get("attempt", stored_attempt)
+                default_attempt = stored_attempt
+            elif retry_attempt_value > stored_attempt:
+                raw_attempt = retry_attempt_value
+                default_attempt = retry_attempt_value
+            else:
+                raw_attempt = stored_attempt
+                default_attempt = stored_attempt
+            try:
+                attempt_value = max(0, int(raw_attempt or 0))
+            except (TypeError, ValueError):
+                attempt_value = default_attempt
+
+            raw_source_label = data.get("source_label", data.get("source", current_source_label))
+            source_label_value = str(raw_source_label or current_source_label or "").strip()
+
+            same_progress_scope = (
+                attempt_value == stored_attempt
+                and source_label_value == current_source_label
+            )
+            if same_progress_scope and progress_value >= 0.0 and current_progress >= 0.0:
+                progress_value = max(current_progress, progress_value)
+
+            object.__setattr__(self, "progress", progress_value)
+            object.__setattr__(self, "speed", speed_value)
+            object.__setattr__(self, "downloaded_size", downloaded_value)
+            object.__setattr__(self, "progress_attempt", attempt_value)
+            object.__setattr__(self, "progress_source_label", source_label_value)
+
+            return (
+                progress_value,
+                speed_value,
+                downloaded_value,
+                attempt_value,
+                source_label_value,
+                current_progress,
+            )
 
     def transition(self, new_status: str, *, reason: Optional[str] = None) -> None:
         """Move the task to ``new_status`` under ``self.lock``.
@@ -389,9 +533,7 @@ class DownloadTask:
             # pid, and leaving ``process`` behind would risk double-kills
             # or stale handle reads.
             if reason is not None:
-                reason_value = (
-                    reason.value if hasattr(reason, "value") else str(reason)
-                )
+                reason_value = str(getattr(reason, "value", reason))
                 # Compare against the canonical ``StopReason.ENGINE_SWITCH``
                 # string literal so callers can pass either the enum or the
                 # plain ``"engine_switch"`` literal.
@@ -426,8 +568,8 @@ class DownloadTask:
 # and so any future telemetry pipeline can serialize the snapshot
 # without risking a mutation race (see design 2.3 / data models / R29).
 #
-# Fields are kept deliberately minimal - only what the UI already
-# displays today plus the machine-parsable ``stop_reason`` / ``error``
+# Fields are kept to the UI/telemetry contract: display text needed by
+# the queue panel, plus the machine-parsable ``stop_reason`` / ``error``
 # annotations used by the Stage 3 classifier (R18). ``url_masked`` goes
 # through :func:`utils.redact.redact_url` so sensitive query values
 # (token / sign / signature / auth) never leak to the UI layer or any
@@ -460,8 +602,7 @@ class TaskSnapshot:
     * ``progress``     -- 0..100 percentage (matches the scale used by
       ``DownloadTask.progress`` today).
     * ``speed_bps``    -- best-effort integer bytes/sec. When the engine
-      only reports a human-readable speed string this falls back to 0
-      and the UI keeps the legacy display via the raw-task path.
+      only reports a human-readable speed string this falls back to 0.
     * ``stop_reason``  -- raw ``task.stop_reason`` string (matches the
       ``utils.errors.StopReason`` enum values; empty string when no
       stop has been requested).
@@ -471,6 +612,14 @@ class TaskSnapshot:
     * ``updated_at``   -- Unix timestamp of the moment the snapshot was
       materialized; emitted as a float for precision and JSON-friendly
       serialization.
+    * ``speed_text``   -- the exact human-readable speed text from the
+      engine, allowing the UI to avoid reading raw ``DownloadTask``.
+    * ``downloaded_text`` -- human-readable downloaded/segment text used
+      for unknown-total progress display.
+    * ``save_dir``     -- save directory shown in filename tooltip.
+    * ``attempt``      -- retry/progress attempt captured with the snapshot.
+    * ``source_label`` -- runtime progress source label, falling back to the
+                          normalized resource source label when unavailable.
     """
 
     task_id: str
@@ -483,6 +632,11 @@ class TaskSnapshot:
     stop_reason: Optional[str]
     error: Optional[str]
     updated_at: float
+    speed_text: str = ""
+    downloaded_text: str = ""
+    save_dir: str = ""
+    attempt: int = 0
+    source_label: str = ""
 
     # Field ordering used by :meth:`to_dict`. Keeping a dedicated tuple
     # (instead of relying on ``dataclasses.fields``) makes the on-wire
@@ -502,6 +656,11 @@ class TaskSnapshot:
         "stop_reason",
         "error",
         "updated_at",
+        "speed_text",
+        "downloaded_text",
+        "save_dir",
+        "attempt",
+        "source_label",
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -538,6 +697,11 @@ class TaskSnapshot:
             "stop_reason": self.stop_reason or "",
             "error": self.error or "",
             "updated_at": float(self.updated_at),
+            "speed_text": self.speed_text or "",
+            "downloaded_text": self.downloaded_text or "",
+            "save_dir": self.save_dir or "",
+            "attempt": int(self.attempt or 0),
+            "source_label": self.source_label or "",
         }
 
     @classmethod
@@ -556,10 +720,24 @@ class TaskSnapshot:
             status = task.status
             progress = float(task.progress or 0.0)
             speed_bps = _coerce_speed_bps(task.speed)
+            speed_text = task.speed or ""
+            downloaded_text = task.downloaded_size or ""
+            save_dir = task.save_dir or ""
             stop_reason = task.stop_reason or None
             error = task.error_message or None
             engine = task.engine or ""
             title = task.filename or ""
+            try:
+                retry_attempt = max(0, int(task.retry_count or 0))
+            except (TypeError, ValueError):
+                retry_attempt = 0
+            try:
+                progress_attempt = max(0, int(getattr(task, "progress_attempt", 0) or 0))
+            except (TypeError, ValueError):
+                progress_attempt = 0
+            attempt = max(retry_attempt, progress_attempt)
+            progress_source_label = str(getattr(task, "progress_source_label", "") or "").strip()
+            source_label = progress_source_label or (task.source or "")
             # ``task_id`` uses ``id(task)`` today because neither
             # ``DownloadTask`` nor ``DownloadQueuePanel`` carries a
             # stable UUID yet; stringifying keeps the contract explicit
@@ -577,6 +755,11 @@ class TaskSnapshot:
             stop_reason=stop_reason,
             error=error,
             updated_at=time.time(),
+            speed_text=speed_text,
+            downloaded_text=downloaded_text,
+            save_dir=save_dir,
+            attempt=attempt,
+            source_label=source_label,
         )
 
 

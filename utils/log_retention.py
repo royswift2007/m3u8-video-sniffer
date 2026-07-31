@@ -13,7 +13,41 @@ from pathlib import Path
 
 RUNTIME_LOG_LIMIT_BYTES = 50 * 1024 * 1024
 _RUNTIME_LOG_PATTERNS = ("m3u8sniffer_*.log",)
-_RUNTIME_LOG_NAMES = {"protocol_handler.log"}
+_RUNTIME_LOG_NAMES = {"m3u8sniffer.log", "protocol_handler.log"}
+
+_FILE_LOG_LEVELS = {
+    "CRITICAL": logging.CRITICAL,
+    "FATAL": logging.CRITICAL,
+    "ERROR": logging.ERROR,
+    "WARN": logging.WARNING,
+    "WARNING": logging.WARNING,
+    "INFO": logging.INFO,
+    "DEBUG": logging.DEBUG,
+    "NOTSET": logging.NOTSET,
+}
+
+
+def _resolve_file_log_level() -> int:
+    """Return the file-log threshold from environment switches.
+
+    Normal users should get compact logs by default (INFO).  Troubleshooting
+    can opt into DEBUG with the historical ``M3U8D_LOG_DEBUG=1`` switch, while
+    deployments that want even less output can set ``M3U8D_LOG_LEVEL=WARNING``
+    or ``ERROR``.  ``M3U8D_LOG_LEVEL`` takes precedence when valid.
+    """
+    configured = os.environ.get("M3U8D_LOG_LEVEL")
+    if configured:
+        level_text = configured.strip().upper()
+        if level_text:
+            if level_text.isdigit():
+                return int(level_text)
+            level = _FILE_LOG_LEVELS.get(level_text)
+            if level is not None:
+                return level
+
+    if os.environ.get("M3U8D_LOG_DEBUG") == "1":
+        return logging.DEBUG
+    return logging.INFO
 
 
 def _oldest_first_key(path: Path) -> tuple[float, str]:
@@ -109,7 +143,9 @@ class CapacityManagedFileHandler(logging.FileHandler):
       - Rotation failures are written once to ``stderr`` and swallowed so the
         logging pipeline can never crash the host process.
       - The default file-level is ``INFO``; setting ``M3U8D_LOG_DEBUG=1`` in the
-        environment elevates it to ``DEBUG``.
+        environment elevates it to ``DEBUG``. ``M3U8D_LOG_LEVEL`` can override
+        the threshold explicitly, e.g. ``WARNING`` or ``ERROR`` for quieter
+        background logs.
 
     Constructor signature stays backwards-compatible with existing callers
     (``CapacityManagedFileHandler(log_file, encoding='utf-8')``).
@@ -123,11 +159,13 @@ class CapacityManagedFileHandler(logging.FileHandler):
         delay: bool = True,
         max_total_bytes: int = RUNTIME_LOG_LIMIT_BYTES,
         *,
+        reserve_bytes: int = 1024 * 1024,
         rotate_check_interval_n: int = 1000,
         rotate_check_interval_s: float = 5.0,
     ):
         super().__init__(filename, mode=mode, encoding=encoding, delay=delay)
         self.max_total_bytes = max_total_bytes
+        self._reserve_bytes = max(0, int(reserve_bytes))
         self._log_dir = Path(self.baseFilename).parent
         # Guard against nonsensical values without breaking callers.
         self._rotate_check_interval_n = max(1, int(rotate_check_interval_n))
@@ -137,11 +175,9 @@ class CapacityManagedFileHandler(logging.FileHandler):
         self._cached_listing: list[Path] | None = None
         self._cached_listing_mtime: float = -1.0
 
-        # Default file level: INFO. Elevated to DEBUG only via env var.
-        if os.environ.get("M3U8D_LOG_DEBUG") == "1":
-            self.setLevel(logging.DEBUG)
-        else:
-            self.setLevel(logging.INFO)
+        # Default file level: INFO. Elevated/reduced only via environment
+        # switches; callers should not force DEBUG for normal application use.
+        self.setLevel(_resolve_file_log_level())
 
     # ------------------------------------------------------------------ public
     def emit(self, record: logging.LogRecord) -> None:
@@ -181,6 +217,7 @@ class CapacityManagedFileHandler(logging.FileHandler):
             deleted = _prune_listing(
                 self._cached_listing,
                 limit_bytes=self.max_total_bytes,
+                reserve_bytes=self._reserve_bytes,
             )
             if deleted:
                 # Directory contents changed; force a re-scan next round.

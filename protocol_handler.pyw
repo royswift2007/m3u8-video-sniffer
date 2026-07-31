@@ -20,6 +20,11 @@ from typing import Optional
 
 from utils.log_retention import prune_runtime_logs
 
+# ISS-45: log_message 节流参数——避免每次日志都全目录扫描 prune_runtime_logs
+_LOG_PRUNE_INTERVAL_SECONDS = 300  # 5 分钟节流
+_LOG_PRUNE_CALL_COUNTER = {"calls": 0, "last_ts": 0.0}
+_LOG_PRUNE_CALL_INTERVAL = 50  # 每 50 次调用也强制一次
+
 API_HOST = "127.0.0.1"
 API_PORT_MIN = 9527
 API_PORT_MAX = 9539
@@ -111,7 +116,21 @@ def log_message(msg: str):
     log_file = log_dir / "protocol_handler.log"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     message = f"[{timestamp}] {msg}\n"
-    prune_runtime_logs(log_dir, reserve_bytes=len(message.encode("utf-8")))
+    # ISS-45: 节流 prune_runtime_logs，避免每次 log_message 都全目录扫描
+    counter = _LOG_PRUNE_CALL_COUNTER
+    counter["calls"] += 1
+    now = time.time()
+    should_prune = (
+        counter["calls"] >= _LOG_PRUNE_CALL_INTERVAL
+        or (now - counter["last_ts"]) >= _LOG_PRUNE_INTERVAL_SECONDS
+    )
+    if should_prune:
+        try:
+            prune_runtime_logs(log_dir, reserve_bytes=len(message.encode("utf-8")))
+            counter["calls"] = 0
+            counter["last_ts"] = now
+        except Exception:
+            pass
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(message)
 
@@ -176,6 +195,25 @@ def _read_session_token() -> Optional[str]:
     return token
 
 
+def _strip_internal_keys(headers) -> dict:
+    """Drop any ``_``-prefixed keys from an external ``headers`` mapping.
+
+    F-03 (audit finding High #2 / §2.4 #4): a malicious ``m3u8dl://``
+    payload can carry ``"_cookie_file": "<arbitrary path>"`` in its JSON
+    headers, which would survive into CatCatch and be read by
+    ``ytdlp_engine`` via ``--cookies <path>`` — letting a remote page
+    point the engine at any local file. The CatCatch server already
+    strips ``_``-prefixed keys at ingest, but the protocol handler must
+    strip them at the JSON parse boundary too so the value never reaches
+    the POST body in the first place (defence in depth).
+
+    Returns a plain dict copy; non-dict input yields ``{}``.
+    """
+    if not isinstance(headers, dict):
+        return {}
+    return {k: v for k, v in headers.items() if not (isinstance(k, str) and k.startswith("_"))}
+
+
 def parse_n_m3u8dl_format(raw_url: str) -> dict:
     """Parse N_m3u8DL-RE command style text."""
     result = {"url": "", "headers": {}, "filename": "", "save_dir": ""}
@@ -212,6 +250,11 @@ def parse_n_m3u8dl_format(raw_url: str) -> dict:
         key, value = item.split(":", 1)
         key = key.strip().lower()
         value = value.strip()
+        # F-03: drop ``_``-prefixed internal keys (e.g. ``_cookie_file``)
+        # that originate from the command-line payload so they cannot
+        # reach the CatCatch POST body / ytdlp ``--cookies`` path.
+        if key.startswith("_"):
+            continue
         if key not in ("accept", "accept-encoding", "accept-language"):
             result["headers"][key] = value
 
@@ -238,7 +281,11 @@ def parse_m3u8dl_url(raw_url: str) -> dict:
         try:
             json_data = json.loads(data)
             result["url"] = json_data.get("url", "")
-            result["headers"] = json_data.get("headers", {})
+            # F-03: strip ``_``-prefixed internal keys so a malicious
+            # JSON payload cannot inject ``_cookie_file`` etc. into the
+            # CatCatch POST body (would let a remote page point yt-dlp
+            # at an arbitrary local file via ``--cookies``).
+            result["headers"] = _strip_internal_keys(json_data.get("headers", {}))
             result["filename"] = json_data.get("name", "") or json_data.get("filename", "")
             return result
         except json.JSONDecodeError:
@@ -255,7 +302,8 @@ def parse_m3u8dl_url(raw_url: str) -> dict:
     try:
         json_data = json.loads(data)
         result["url"] = json_data.get("url", "")
-        result["headers"] = json_data.get("headers", {})
+        # F-03: same ``_``-prefix strip on the fallback JSON path.
+        result["headers"] = _strip_internal_keys(json_data.get("headers", {}))
         result["filename"] = json_data.get("name", "") or json_data.get("filename", "")
         return result
     except json.JSONDecodeError:
@@ -297,10 +345,13 @@ def _send_to_single_port(port: int, url: str, headers: dict, filename: str, time
     req_headers: dict[str, str] = {"Content-Type": "application/json"}
     token: Optional[str] = None
     if legacy:
-        # Rollback mode — behave byte-for-byte like the pre-bugfix F.
-        # Log once per call so operators can see the legacy path at runtime.
+        # F-07: legacy handoff is a rollback escape hatch that bypasses
+        # the session-token + Origin handshake. Structured event tag so
+        # audit searches can find every legacy trigger; also emitted at
+        # main-app startup when the env var is set.
         log_message(
-            f"HTTP 投递(legacy 模式): {API_HOST}:{port} token 与 Origin 头被跳过"
+            f"HTTP 投递(legacy 模式): {API_HOST}:{port} token 与 Origin 头被跳过 "
+            f"event=protocol_handler_legacy_handoff env_var={LEGACY_HANDOFF_ENV}=1 port={port}"
         )
     else:
         # R1 AC3 / R3 AC6: hardcoded loopback Origin (no port). The literal

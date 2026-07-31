@@ -1,6 +1,5 @@
 @echo off
 setlocal EnableExtensions
-chcp 65001 >nul
 
 for %%I in ("%~dp0..") do set "ROOT_DIR=%%~fI"
 set "CLI_SCRIPT=%ROOT_DIR%\scripts\download_dependencies.py"
@@ -8,16 +7,16 @@ set "EXIT_CODE=1"
 set "COUNTDOWN_SECONDS=10"
 
 echo ============================================
-echo   M3U8D ä¾èµ–ä¸‹è½½è„šæœ¬
+echo   M3U8D ÒÀÀµÏÂÔØ½Å±¾
 echo ============================================
 echo [INFO] ROOT: %ROOT_DIR%
-echo [INFO] é»˜è®¤ä»…ä¸‹è½½å¿…é¡»ä¾èµ–ã€‚
-echo [INFO] å¦‚éœ€åŒæ—¶ä¸‹è½½å»ºè®®ä¾èµ–ï¼Œå¯è¿½åŠ å‚æ•°: --include-recommended
-echo [INFO] å°†æ˜¾ç¤ºä¾èµ–æ¸…å•ã€é€é¡¹çŠ¶æ€ä¸Žä¸‹è½½è¿›åº¦ã€‚
+echo [INFO] Ä¬ÈÏ½öÏÂÔØ±ØÐëÒÀÀµ¡£
+echo [INFO] ÈçÐèÍ¬Ê±ÏÂÔØ½¨ÒéÒÀÀµ£¬¿É×·¼Ó²ÎÊý: --include-recommended
+echo [INFO] ½«ÏÔÊ¾ÒÀÀµÇåµ¥¡¢ÖðÏî×´Ì¬ÓëÏÂÔØ½ø¶È¡£
 echo.
 
 if not exist "%CLI_SCRIPT%" (
-    echo [ERROR] æœªæ‰¾åˆ°ä¾èµ–ä¸‹è½½å…¥å£: "%CLI_SCRIPT%"
+    echo [ERROR] Î´ÕÒµ½ÒÀÀµÏÂÔØÈë¿Ú: "%CLI_SCRIPT%"
     endlocal & exit /b 1
 )
 
@@ -37,8 +36,8 @@ if not errorlevel 1 goto :run_with_py_launcher
 where python >nul 2>nul
 if not errorlevel 1 goto :run_with_python_path
 
-echo [ERROR] æœªæ‰¾åˆ°å¯ç”¨çš„ Python è§£é‡Šå™¨ã€‚
-echo [ERROR] è¯·å…ˆå®‰è£… Pythonï¼Œæˆ–è®¾ç½® M3U8D_PYTHON çŽ¯å¢ƒå˜é‡åŽé‡è¯•ã€‚
+echo [ERROR] Î´ÕÒµ½¿ÉÓÃµÄ Python ½âÊÍÆ÷¡£
+echo [ERROR] ÇëÏÈ°²×° Python£¬»òÉèÖÃ M3U8D_PYTHON »·¾³±äÁ¿ºóÖØÊÔ¡£
 endlocal & exit /b 1
 
 :run_with_python_exe
@@ -68,11 +67,11 @@ goto :finish
 :finish
 echo.
 if "%EXIT_CODE%"=="0" (
-    echo [INFO] ä¾èµ–ä¸‹è½½å®Œæˆã€‚
+    echo [INFO] ÒÀÀµÏÂÔØÍê³É¡£
 ) else (
-    echo [ERROR] ä¾èµ–ä¸‹è½½å¤±è´¥ï¼Œé€€å‡ºç : %EXIT_CODE%
+    echo [ERROR] ÒÀÀµÏÂÔØÊ§°Ü£¬ÍË³öÂë: %EXIT_CODE%
 )
-echo [INFO] æ­¤çª—å£å°†åœ¨ %COUNTDOWN_SECONDS% ç§’åŽè‡ªåŠ¨å…³é—­...
+echo [INFO] ´Ë´°¿Ú½«ÔÚ %COUNTDOWN_SECONDS% Ãëºó×Ô¶¯¹Ø±Õ...
 timeout /t %COUNTDOWN_SECONDS% /nobreak >nul
 
 endlocal & exit /b %EXIT_CODE%

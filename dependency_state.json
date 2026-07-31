@@ -1,0 +1,52 @@
+{
+  "dependencies": {
+    "yt-dlp": {
+      "label": "yt-dlp",
+      "path": "bin/yt-dlp.exe",
+      "version_key": "github_release:yt-dlp/yt-dlp:2026.06.09:yt-dlp.exe:443156617:2026-06-09T23:26:52Z",
+      "display_version": "2026.06.09",
+      "download_url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp.exe",
+      "installed_at": 1782290362
+    },
+    "n_m3u8dl_re": {
+      "label": "N_m3u8DL-RE",
+      "path": "bin/N_m3u8DL-RE.exe",
+      "version_key": "github_release:nilaoda/N_m3u8DL-RE:v0.5.1-beta:N_m3u8DL-RE_v0.5.1-beta_win-x64_20251029.zip:310138370:2025-10-29T14:20:47Z",
+      "display_version": "v0.5.1-beta",
+      "download_url": "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.5.1-beta/N_m3u8DL-RE_v0.5.1-beta_win-x64_20251029.zip",
+      "installed_at": 1782290366
+    },
+    "ffmpeg": {
+      "label": "FFmpeg",
+      "path": "bin/ffmpeg.exe",
+      "version_key": "direct:https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip:version:8.1.1",
+      "display_version": "8.1.1",
+      "download_url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+      "installed_at": 1782290378
+    },
+    "aria2": {
+      "label": "aria2c",
+      "path": "bin/aria2c.exe",
+      "version_key": "github_release:aria2/aria2:release-1.37.0:aria2-1.37.0-win-64bit-build1.zip:135654444:2023-11-15T12:06:51Z",
+      "display_version": "release-1.37.0",
+      "download_url": "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip",
+      "installed_at": 1782290380
+    },
+    "streamlink": {
+      "label": "Streamlink",
+      "path": "bin/streamlink.exe",
+      "version_key": "github_release:streamlink/windows-builds:8.4.0-1:streamlink-8.4.0-1-py314-x86_64.zip:413745579:2026-05-06T18:36:31Z",
+      "display_version": "8.4.0-1",
+      "download_url": "https://github.com/streamlink/windows-builds/releases/download/8.4.0-1/streamlink-8.4.0-1-py314-x86_64.zip",
+      "installed_at": 1782290389
+    },
+    "deno": {
+      "label": "Deno",
+      "path": "bin/deno.exe",
+      "version_key": "github_release:denoland/deno:v2.9.0:deno-x86_64-pc-windows-msvc.zip:457672236:2026-06-25T13:38:40Z",
+      "display_version": "v2.9.0",
+      "download_url": "https://github.com/denoland/deno/releases/download/v2.9.0/deno-x86_64-pc-windows-msvc.zip",
+      "installed_at": 1782402483
+    }
+  }
+}

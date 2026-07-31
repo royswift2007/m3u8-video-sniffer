@@ -158,9 +158,12 @@ class MainWindowActionsMixin:
         # 浏览器视图
         self.browser = BrowserView(self.sniffer)
 
-        # 连接 yt-dlp 的 cookie_exporter 回调到浏览器
+        # 连接下载引擎的 cookie_exporter 回调到内置浏览器。
+        # yt-dlp 可直接读取浏览器 profile；N_m3u8DL-RE 需要转换成 Cookie header。
         if hasattr(self, 'ytdlp_engine') and self.ytdlp_engine:
             self.ytdlp_engine.cookie_exporter = self.browser.export_cookies_to_file
+        if hasattr(self, 'n_m3u8dl_engine') and self.n_m3u8dl_engine:
+            self.n_m3u8dl_engine.cookie_exporter = self.browser.export_cookies_to_file
 
         browser_layout.addWidget(browser_toolbar_card)
         browser_layout.addWidget(self.browser, stretch=1)
@@ -683,7 +686,7 @@ class MainWindowActionsMixin:
         if value == 0:
             logger.info("已取消限速")
         else:
-            logger.info(f"限速已设置: {value} KB/s")
+            logger.info(f"限速已设置: {value} MB/s")
 
     # ------------------------------------------------------------------
     # Quick Manual dialog (menu slot)
@@ -728,9 +731,9 @@ class MainWindowActionsMixin:
         for script_name, script_desc in quick_scripts:
             quick_links_html.append(
                 f"""
-                <div style="margin-bottom: 12px;">
-                    <a href="script:///{script_name}" style="text-decoration:none; font-weight:700; color:#1f4e79;">{html.escape(script_name)}</a><br>
-                    <span style="color:#66717d;">{"Description" if is_en else "说明"}：{html.escape(script_desc)}</span>
+                <div style="padding:10px 12px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; margin-bottom:8px;">
+                    <a href="script:///{script_name}" style="text-decoration:none; font-weight:700; color:#2563eb; font-size:13px; font-family:Consolas,monospace;">⚙️ {html.escape(script_name)}</a>
+                    <span style="color:#64748b; font-size:13px; margin-left:12px;">（{"Description" if is_en else "说明"}：{html.escape(script_desc)}）</span>
                 </div>
                 """
             )
@@ -747,14 +750,96 @@ class MainWindowActionsMixin:
         else:
             manual_text = f"Manual file not found: {manual_path}"
 
+        # 简易而高性能的 Markdown 解析函数，完美适配 QTextBrowser 所支持的富文本标签
+        import re
+        def render_markdown_to_html(md_text):
+            # 转义基本 HTML 实体防止冲突
+            lines = html.escape(md_text).split('\n')
+            in_table = False
+            in_list = False
+            html_lines = []
+
+            for line in lines:
+                stripped = line.strip()
+                
+                # 处理表格边界及渲染
+                if '|' in line and not stripped.startswith('==') and not stripped.startswith('--'):
+                    if not in_table:
+                        in_table = True
+                        html_lines.append('<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse; border:1px solid #cbd5e1; margin:14px 0; width:100%; font-size:13px;">')
+                    
+                    # 分割单元格并转换为 td / th
+                    cells = [c.strip() for c in line.split('|')][1:-1]
+                    # 识别是否为表头线或普通行
+                    if len(cells) > 0:
+                        is_header = "th" if len(html_lines) == 1 or html_lines[-1].startswith('<table') else "td"
+                        bg_style = ' style="background-color:#f1f5f9; font-weight:700; color:#1e293b;"' if is_header == 'th' else ''
+                        row_str = "<tr>" + "".join(f"<{is_header}{bg_style}>{c}</{is_header}>" for c in cells) + "</tr>"
+                        html_lines.append(row_str)
+                    continue
+                else:
+                    if in_table:
+                        in_table = False
+                        html_lines.append('</table>')
+
+                # 处理标题级别
+                if stripped.startswith('### '):
+                    html_lines.append(f'<h3 style="color:#0f172a; margin-top:16px; margin-bottom:8px; font-size:15px; border-bottom:1px dashed #e2e8f0; padding-bottom:4px;">📌 {stripped[4:]}</h3>')
+                    continue
+                elif stripped.startswith('## '):
+                    html_lines.append(f'<h2 style="color:#1e3a8a; margin-top:22px; margin-bottom:12px; font-size:17px; border-left:4px solid #2563eb; padding-left:8px;">{stripped[3:]}</h2>')
+                    continue
+                elif stripped.startswith('# '):
+                    html_lines.append(f'<h1 style="color:#1e1b4b; background:#eef2ff; margin-top:26px; margin-bottom:16px; font-size:20px; padding:8px 12px; border-radius:6px;">📘 {stripped[2:]}</h1>')
+                    continue
+
+                # 处理高显警告块 [!IMPORTANT] / 重要提示等
+                if stripped.startswith('> [!') or stripped.startswith('>'):
+                    clean_hint = stripped.replace('>', '').strip()
+                    html_lines.append(f'<div style="background-color:#fffbeb; border-left:4px solid #d97706; padding:10px 14px; margin:10px 0; border-radius:4px; color:#b45309; font-size:13px; line-height:1.6;">💡 {clean_hint}</div>')
+                    continue
+
+                # 处理无序列表
+                if stripped.startswith('- ') or stripped.startswith('* '):
+                    if not in_list:
+                        in_list = True
+                        html_lines.append('<ul style="margin:6px 0; padding-left:20px; line-height:1.6; color:#334155;">')
+                    html_lines.append(f'<li>{stripped[2:]}</li>')
+                    continue
+                else:
+                    if in_list:
+                        in_list = False
+                        html_lines.append('</ul>')
+
+                # 行内高亮代码/加粗替换处理
+                processed_line = line
+                processed_line = re.sub(r'\*\*(.*?)\*\*', r'<b style="color:#0f172a;">\1</b>', processed_line)
+                processed_line = re.sub(r'`(.*?)`', r'<code style="font-family:Consolas,monospace; background-color:#f1f5f9; color:#b91c1c; padding:2px 4px; border-radius:3px; font-size:12px;">\1</code>', processed_line)
+
+                # 空行保持间距，普通文本正常分段
+                if not stripped:
+                    html_lines.append('<br>')
+                else:
+                    html_lines.append(f'<p style="margin:4px 0; line-height:1.6; color:#334155; font-size:13.5px;">{processed_line}</p>')
+
+            if in_table: html_lines.append('</table>')
+            if in_list: html_lines.append('</ul>')
+            return "\n".join(html_lines)
+
+        rendered_content = render_markdown_to_html(manual_text)
+
         manual_html = f"""
         <html>
-          <body style="font-family:'Microsoft YaHei','Segoe UI',sans-serif; color:#243447;">
-            <div style="background:#faf7f1; border:1px solid #e4ddd0; border-radius:8px; padding:12px 14px; margin-bottom:14px;">
-              <div style="font-weight:700; font-size:16px; color:#17324d; margin-bottom:6px;">{TR("quick_manual")} - Scripts</div>
+          <body style="font-family:'Segoe UI','Microsoft YaHei UI',sans-serif; background-color:#ffffff; margin:0; padding:14px;">
+            
+            <div style="background:#fafafa; border:1px solid #eaeaea; border-radius:10px; padding:16px; margin-bottom:20px; box-shadow: 0 1px 3px rgba(0,0,0,0.02);">
+              <div style="font-weight:700; font-size:15px; color:#1e3a8a; margin-bottom:12px; font-family:'Segoe UI','Microsoft YaHei UI'; border-bottom:2px solid #3b82f6; padding-bottom:4px; width:fit-content;">🛠️ {TR("quick_manual")} - Quick Scripts</div>
               {''.join(quick_links_html)}
             </div>
-            <pre style="white-space:pre-wrap; font-family:'Consolas','Microsoft YaHei UI','Segoe UI',sans-serif; font-size:13px; line-height:1.55; margin:0;">{html.escape(manual_text)}</pre>
+            
+            <div style="background-color:#ffffff; padding:4px; font-family:'Segoe UI','Microsoft YaHei UI',sans-serif;">
+              {rendered_content}
+            </div>
           </body>
         </html>
         """

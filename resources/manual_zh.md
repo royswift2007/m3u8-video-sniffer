@@ -1,5 +1,5 @@
 M3U8 Video Sniffer 详细使用手册（按当前程序实际代码整理）
-> 当前对应程序版本: v0.4.1 (M3U8D)
+> 当前对应程序版本: v0.5.0 (M3U8D)
 
 # 首次运行前必看：运行环境与 Chrome 重要说明
 
@@ -58,35 +58,18 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     2. 在播放过程中自动发现 m3u8 / mpd / mp4 / webm / 磁力链接等候选资源。
     3. 将资源放入资源列表，供用户筛选、选择清晰度、指定引擎、加入下载队列。
     4. 用多种下载引擎执行任务，并记录日志、历史和失败重试信息。
-
 程序入口与主链路如下：
-    - main.py
-      负责启动 QApplication、创建主窗口、解析 --url / --headers / --filename 参数。
-
-    - ui/main_window.py
-      负责把浏览器页、资源页、下载管理页拼装成主界面，并连接所有信号。
-
-    - core/playwright_driver.py
-      负责启动持久化 Chrome、监听页面导航、网络请求、响应和前端脚本回传结果。
-
-    - core/m3u8_sniffer.py
-      负责统一接收发现到的资源、规范化 headers、应用站点规则、去重、合并上下文。
-
-    - ui/resource_panel.py
-      负责显示资源表格、过滤、批量操作、M3U8 后台解析与变体展示。
-
-    - core/download_manager.py
-      负责队列、并发、重试、回退、HLS 预探测、状态流转和下载指标。
-
-    - engines/*.py
-      负责把任务分别交给 N_m3u8DL-RE、yt-dlp、Streamlink、Aria2 执行。
-
-    - ui/download_queue.py / ui/log_panel.py / ui/history_panel.py
-      分别负责任务队列显示、关键日志显示、下载历史记录与重下。
-
-    - core/catcatch_server.py + protocol_handler.pyw
-      负责与浏览器扩展、系统协议联动，把外部请求送进程序。
-
+    - main.py负责启动 QApplication、创建主窗口、解析 --url / --headers / --filename 参数。
+    - ui/main_window.py负责把浏览器页、资源页、下载管理页拼装成主界面，并连接所有信号。
+    - core/playwright_driver.py负责启动持久化 Chrome、监听页面导航、网络请求、响应和前端脚本回传结果。
+    - core/download_context.py定义统一的 EngineSelectContext，将 url、page_url、page_title、source、resource_type、mime、headers、master_url、media_url、metadata 打包为一个结构化对象。CatCatch 路径和内置浏览器路径都在早期构造此上下文，贯穿整个嗅探 → 引擎选择 → 下载入队链路，实现上下文感知的引擎选择。
+    - core/engine_selector.py负责为每个资源选择最佳下载引擎。决策链为：用户指定 → 上下文感知检测（resource_type / mime）→ HEAD MIME 探测 → 扩展名回退 → 直播平台名单 → yt-dlp 兜底。
+    - core/m3u8_sniffer.py负责统一接收发现到的资源、规范化 headers、应用站点规则、去重、合并上下文。
+    - ui/resource_panel.py负责显示资源表格、过滤、批量操作、M3U8 后台解析与变体展示。
+    - core/download_manager.py负责队列、并发、重试、回退、HLS 预探测、状态流转和下载指标。
+    - engines/*.py负责把任务分别交给 N_m3u8DL-RE、yt-dlp、Streamlink、Aria2 执行。
+    - ui/download_queue.py / ui/log_panel.py / ui/history_panel.py分别负责任务队列显示、关键日志显示、下载历史记录与重下。
+    - core/catcatch_server.py + protocol_handler.pyw负责与浏览器扩展、系统协议联动，把外部请求送进程序。
 
 ================================================================================
 2. 启动方式与外部参数
@@ -101,27 +84,16 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         3. 初始化下载管理器与资源嗅探器。
         4. 启动本地 CatCatch HTTP 服务。
         5. 显示浏览器 / 资源列表 / 下载中心三大页签。
-
 2.2 命令行参数启动
     当前入口实际支持以下参数：
         --url
-            外部传入的视频或页面 URL。
-            校验规则：仅接受 http / https 协议，长度上限 4096 字符；
-            会做内网 / 云元数据过滤（拒绝 127/10/172.16-31/192.168/169.254/::1/fc00::/fe80:: 以及 169.254.169.254 等云元数据地址）。
-            违规时程序以退出码 2 结束，不会启动 UI。
+            外部传入的视频或页面 URL。校验规则：仅接受 http / https 协议，长度上限 4096 字符；会做内网 / 云元数据过滤（拒绝 127/10/172.16-31/192.168/169.254/::1/fc00::/fe80:: 以及 169.254.169.254 等云元数据地址）。违规时程序以退出码 2 结束，不会启动 UI。
 
         --headers
-            JSON 字符串，格式通常为：
-            {"referer":"...","user-agent":"...","cookie":"..."}
-            校验规则：会经过与 CatCatch HTTP 相同的头部清洗——
-            名称只允许 `[A-Za-z0-9-]` 且长度 ≤64；值不得含 `\r \n \0`，长度 ≤4096；
-            仅保留 Referer / User-Agent / Origin / Cookie / Accept-Language 白名单内字段，其它字段会被静默丢弃。
+            JSON 字符串，格式通常为：{"referer":"...","user-agent":"...","cookie":"..."}校验规则：会经过与 CatCatch HTTP 相同的头部清洗——名称只允许 `[A-Za-z0-9-]` 且长度 ≤64；值不得含 `\r \n \0`，长度 ≤4096；仅保留 Referer / User-Agent / Origin / Cookie / Accept-Language 白名单内字段，其它字段会被静默丢弃。
 
         --filename
-            传入资源的默认文件名或标题。
-            校验规则：会自动清洗 Windows 保留名（CON / PRN / AUX / NUL / COM1-9 / LPT1-9）、
-            ASCII 控制符、末尾 `.` 与空格；最终绝对路径字节长度限制在 240 以内；
-            完全为空时用 `media_<时间戳>` 兜底。
+            传入资源的默认文件名或标题。校验规则：会自动清洗 Windows 保留名（CON / PRN / AUX / NUL / COM1-9 / LPT1-9）、ASCII 控制符、末尾 `.` 与空格；最终绝对路径字节长度限制在 240 以内；完全为空时用 `media_<时间戳>` 兜底。
 
     实际执行逻辑：
         1. 先正常启动主界面。
@@ -129,12 +101,10 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         3. 程序根据 URL 自动选择引擎。
         4. 资源会直接加入“资源列表”页。
         5. 界面自动切换到资源列表页，等待用户继续下载。
-
     适用场景：
         - 协议处理器启动程序时回传链接。
         - 外部脚本把解析好的链接交给程序。
         - 调试时手工向 GUI 注入一个资源。
-
 2.3 启动时自动设置的浏览器参数
     程序会给 Qt WebEngine/浏览器环境追加：
         --disable-blink-features=AutomationControlled
@@ -150,11 +120,9 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     1. 浏览器工作台
     2. 资源列表
     3. 下载中心
-
 右上角还有“组件管理”和“快速手册”两个入口：
     - 组件管理：打开外部下载组件的状态与更新管理界面。
     - 快速手册：打开当前这份手册。
-
 3.0 组件管理与自动更新说明
     入口位置：
         主窗口右上角新增“组件管理”入口，和“快速手册”位于同一区域。
@@ -165,19 +133,16 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
             - 最新版本
             - 当前状态（例如已安装、缺失、可更新、检查失败等）
             - 本地路径
-
     常用操作：
         - 刷新本地状态：重新扫描本机 bin 目录与可执行文件，更新本地版本、路径和缺失状态。
         - 检查更新：联网读取远端发布信息，只检查最新版本和可更新状态，不会自动下载安装。
         - 更新全部可更新：对当前检测到可更新的组件统一执行更新，执行前会要求确认。
         - 单组件安装 / 更新 / 重试：针对某一个组件执行安装、更新或失败后的重试，适合只补齐缺失组件或只更新指定组件。
-
     启动后的行为：
         程序启动后只会做只读检查和右上角入口提示，用于提醒组件状态；不会在后台自动下载、安装或替换任何组件。
 
     安装包与组件缺失处理：
-        使用安装包安装时，默认会下载必须组件（yt-dlp、N_m3u8DL-RE、FFmpeg）。aria2c、Streamlink 等建议组件需要在安装向导中勾选。
-        如果后续发现组件缺失、版本过旧或路径异常，可以进入“组件管理”执行安装 / 更新。
+        使用安装包安装时，默认会下载必须组件（yt-dlp、N_m3u8DL-RE、FFmpeg）。aria2c、Streamlink 等建议组件需要在安装向导中勾选。如果后续发现组件缺失、版本过旧或路径异常，可以进入“组件管理”执行安装 / 更新。
 
     安全策略：
         - 更新前会进行二次确认，避免误操作。
@@ -191,7 +156,6 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 替换前会把旧文件另存为 `.bak`，保留到下一次启动；替换失败时会尝试用 `.bak` 回滚。任何失败路径都不会修改 bin 目录。
         - 如果目标引擎文件正在被其他进程使用，任务会被标记为 `deferred_pending_restart`，下次启动程序时会自动重试。
         - 更新组件时建议先暂停或结束正在运行的下载任务，避免 yt-dlp.exe、N_m3u8DL-RE.exe、ffmpeg.exe、aria2c.exe、streamlink.exe 等文件被占用导致替换失败。
-
     sha256 来源分层（五个后端都能自动校验）：
         不同后端的官方发布策略不同，程序按下列顺序依次尝试获取可比对的 sha256，保证"没有 sha256 就不敢装"的底线不被绕过：
         - 静态固定值：`deps.json` 里以 `checksum.sha256` 写死一个期望摘要。aria2 1.37.0 就走这条路径（本地直接硬比对，速度最快、最严）。
@@ -200,20 +164,17 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
             · FFmpeg（gyan.dev 构建）：读取构建产物对应的 `.zip.sha256` 文件，作为 zip 的期望值；安装到 bin 后还会再按解压出来的 `ffmpeg.exe` 重新计算一次 sha256。
         - 首次信任（TOFU）：N_m3u8DL-RE、streamlink 的官方 Release 目前不提供标准 sha256 sidecar，程序会在 HTTPS + 严格域名白名单（`github.com` / `objects.githubusercontent.com` / 对应的 PyPI CDN）条件下下载，首次成功安装后把实测摘要固定到 `~/.m3u8d/component_pins.json`；后续同一版本再更新时，如果新下载文件的 sha256 与该文件里记录的值不一致，会以 `pin_mismatch` 失败并回滚，不会静默覆盖。
         - 任何一个后端在上述三条路径里都拿不到可比对的 sha256 时，会以 `missing_checksum` 直接失败、拒绝继续安装（诊断模式下可单独放宽并带审计日志，但默认不开放）。
-
     下载进度与"看起来卡住"：
         组件包体积差异很大（yt-dlp 约 12 MB，N_m3u8DL-RE 约 30 MB，FFmpeg essentials 构建约 130 MB），单次下载耗时从几秒到几分钟不等。为避免大包让界面看起来像"卡住"：
         - 下载阶段会按"每推进 2% 或累计 1 MiB 取较粗的一档"回传进度，界面上的"下载中"状态会持续滚动更新，而不是一直停在固定文字。
         - 单次 HTTPS 请求的总超时为 10 分钟（`network_timeout=600s`），跨此阈值才会判定为超时失败；在此之前没有新进度不代表失败，请先等待或观察网速。
         - 如果长时间完全没有新进度且当前网速为 0，可以在组件管理里点"重试"或"取消"，失败路径不会写坏 bin 目录。
-
     安装后版本复核（更宽松的版本比对）：
         - 复制/替换到 bin 后，程序会调用目标引擎自带的 `--version`（或等效命令）读出实际版本字符串，再和 manifest / 远端声明的目标版本做比对，全部通过才认为"本次更新已完成"。
         - 比对时使用"相容匹配"规则：先各自去掉大小写的 `v` 前缀和两端空白，任意一个字符串是另一个的前缀，且紧邻下一个字符是 `.` `-` `_` `+` 空格 或到达末尾，就算相容。
             · 举例：目标 `8.1.1`，引擎实际输出 `8.1.1-essentials_build-www.gyan.dev`、`ffmpeg version 8.1.1 Copyright ...`、`v8.1.1` 等都会判定为相容，不会误报失败。
             · 但 `8.1.1` 与 `8.1.10` 不相容（紧邻下一个字符是数字 `0`，不在分隔集合里），会以 `version_mismatch` 报错。
         - 只要复核环节判定为 `version_mismatch`，就会立即用替换前保留的 `.bak` 回滚到旧版本，旧版本可立即继续使用。
-
     显示提示：
         如果本地路径、版本号或远端版本文本过长，界面可能只显示截断内容；将鼠标悬停在对应单元格上可查看完整内容。
 
@@ -226,13 +187,11 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 地址栏
         - 开始探测按钮
         - 下载策略下拉框
-
     下方内容分为左右两块：
         左侧是浏览器控制卡片，提供：
             - 启动浏览器
             - 停止浏览器
             - 当前说明文字
-
         右侧是驱动日志区，用来显示浏览器驱动运行时状态。
 
 3.2 资源列表页的组成
@@ -244,7 +203,6 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 来源过滤
         - 清晰度过滤
         - 资源表格
-
     资源表格当前列为：
         1. 文件名
         2. 类型
@@ -253,7 +211,6 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         5. 使用引擎
         6. 检测时间
         7. 操作（下载按钮）
-
 3.3 下载中心页的组成
     页面包含两大区域：
         A. 下载偏好
@@ -264,7 +221,6 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
             - 重试次数
             - 并发任务
             - 限速
-
         B. 下方可拖动分割区域
             - 上半部分：下载队列
             - 下半部分：运行日志 / 下载历史（标签页切换）
@@ -275,43 +231,34 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
 ================================================================================
 4.1 浏览器启动机制
     实现方式：
-        浏览器并不是嵌在 Qt 窗口里的网页控件，而是由 Playwright 启动一个真实的持久化 Chrome。
-        其核心在 core/playwright_driver.py。
+        浏览器并不是嵌在 Qt 窗口里的网页控件，而是由 Playwright 启动一个真实的持久化 Chrome。其核心在 core/playwright_driver.py。
 
     主要特性：
         - 使用持久化用户数据目录保存登录态和 Cookie。
         - 启动时尽量清理 SingletonLock 等残留锁文件。
         - 监听 page、request、response、download、console 等事件。
         - 支持多标签页，用户在 Chrome 中新开页面后会自动配置嗅探逻辑。
-
     使用方法：
         1. 打开“浏览器工作台”。
         2. 点击“启动浏览器”。
         3. 等待驱动日志出现“浏览器已就绪”。
         4. 再进行页面访问、登录、播放等操作。
-
 4.2 地址栏与开始探测
     实现方式：
         地址栏回车和“开始探测”按钮都会触发同一逻辑：
             - 如果输入是普通网址，则交给 Playwright 导航。
             - 如果浏览器未启动，则先启动，再自动导航。
             - 如果输入缺少 http/https，程序会自动补成 https://。
-
     使用方法：
         1. 在地址栏输入站点页面地址。
         2. 回车或点“开始探测”。
         3. 页面会在外部浏览器中打开。
         4. 在页面中点击播放、切换清晰度、登录等真实操作。
-
 4.3 后退 / 前进 / 刷新 / 新建标签
     当前代码状态：
-        - “新建标签”按钮当前会调用 add_new_tab()，其实现是让浏览器加载一个新地址。
-        - back() / forward() / reload() 这些兼容方法在 BrowserView 中仍是空实现占位。
-
+        - 新建标签、后退、前进、刷新均已实现，分别调用 Playwright 页面的 newPage / goBack / goForward / reload。
     这意味着：
-        - “新建标签”可以工作，但本质上是发起导航请求。
-        - 后退、前进、刷新按钮的外观已存在，但当前不属于完整实现状态。
-
+        - 四个导航按钮均可正常工作。
 4.4 下载策略下拉框
     下拉项实际为：
         - 自动选择
@@ -319,7 +266,6 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - yt-dlp
         - Streamlink
         - Aria2
-
     它的作用不是立刻下载，而是：
         在“资源点击下载”时，告诉程序优先用哪个引擎。
 
@@ -327,30 +273,18 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 若所选引擎能处理该 URL，则优先使用用户指定引擎。
         - 若所选引擎不能处理，程序会回退到自动选择。
         - 自动选择优先级见第 8 节。
-
 4.5 浏览器嗅探是怎么实现的
     当前代码实际使用的是 Playwright 嗅探链路，主要不是 QWebEngine 拦截器。
 
     PlaywrightDriver 里有 4 条主要发现路径：
-        1. 页面导航命中视频页面模式
-           例如 YouTube/B站/TikTok/Instagram/Twitch 等页面 URL 规则。
-           命中后，程序会把页面 URL 当作一个 yt-dlp 可处理资源加入列表。
-
-        2. request 事件
-           拦截浏览器发出的网络请求，只要 URL 像视频流，就记录下来。
-
-        3. response 事件
-           当 URL 本身不像视频，但响应头 Content-Type 显示为 HLS/MP4/WebM 等时，也会记录。
-
-        4. 前端注入脚本 + console 回传
-           页面中注入 sniffer_script，在播放时主动把前端发现的媒体地址输出到控制台，
-           Python 侧再接收并入库。
-
+        1. 页面导航命中视频页面模式例如 YouTube/B站/TikTok/Instagram/Twitch 等页面 URL 规则。命中后，程序会把页面 URL 当作一个 yt-dlp 可处理资源加入列表。
+        2. request 事件拦截浏览器发出的网络请求，只要 URL 像视频流，就记录下来。
+        3. response 事件当 URL 本身不像视频，但响应头 Content-Type 显示为 HLS/MP4/WebM 等时，也会记录。
+        4. 前端注入脚本 + console 回传页面中注入 sniffer_script，在播放时主动把前端发现的媒体地址输出到控制台，Python 侧再接收并入库。
     此外还有“捕获窗口”机制：
         - 导航、检测到播放、命中媒体链接时，会开启一段持续探测时间。
         - 在这段时间里定期扫描 video 标签、source 标签、performance 资源列表。
         - 适合抓取延迟出现、动态注入、切清晰度后才出现的媒体链接。
-
 4.6 浏览器页的实际使用建议
     推荐顺序：
         1. 启动浏览器。
@@ -359,11 +293,9 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         4. 回到程序看“资源列表”是否出现候选资源。
         5. 若站点是 YouTube/B站/TikTok 等页面型站点，通常会直接出现页面资源。
         6. 若站点是 HLS 流媒体站点，通常会出现 m3u8 资源或其变体资源。
-
 4.7 磁力链接的特殊处理
     实现方式：
-        在地址栏输入 magnet:? 开头链接时，不会让浏览器导航，而是直接构造一个资源项，
-        强制使用 Aria2 作为建议引擎。
+        在地址栏输入 magnet:? 开头链接时，不会让浏览器导航，而是直接构造一个资源项，强制使用 Aria2 作为建议引擎。
 
     使用方法：
         1. 直接把磁力链接粘贴到地址栏。
@@ -387,14 +319,12 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         4. 根据 URL、标题、平台特征执行去重。
         5. 计算候选分值 candidate_score，用于后续下载侧优选链接。
         6. 通过 on_resource_found 回调交给主窗口和资源表格显示。
-
 5.2 资源去重逻辑
     当前代码的去重不是简单按 URL 一刀切，而是多层策略：
         - 同 URL 资源会合并上下文，而不是一定重复插入。
         - YouTube 等平台会按视频 ID、itag、标题做额外去重。
         - M3U8 master 和 media playlist 会分别构造键值。
         - M3U8 变体资源按 height / bandwidth / variant_url 区分。
-
     作用：
         尽量避免同一视频因为多个 CDN、重复请求、页面刷新而刷满列表。
 
@@ -404,13 +334,11 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 类型过滤
         - 来源过滤
         - 清晰度过滤
-
     使用方法：
         1. 在搜索框输入关键词，可搜标题、tooltip 中的完整 URL、来源文本。
         2. 通过"全部类型 / M3U8 / MPD / MP4 ..."缩小范围；类型列的显示规则是：m3u8 / mpd / mp4 / flv / mkv / webm / ts 等格式直接显示大写原名（`M3U8` / `MPD` / `MP4` / `FLV` / `MKV` / `WEBM` / `TS`），只有 `Unknown` / `Video Stream` / `Playlist` 这三个语义标签才会走界面语言翻译，因此下拉筛选能按字面精确匹配。
         3. 通过来源过滤定位某个页面来源。
         4. 通过 2160 / 1080 / 720 / 音频 等选项筛选清晰度。
-
 5.4 下载所选 / 移除所选 / 清空列表 / 清空临时文件
     下载所选：
         对当前选中的多行逐条执行下载逻辑。
@@ -422,8 +350,7 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         清空资源表格、去重缓存、page_url 映射和过滤条件。
 
     清空临时文件：
-        独立入口（按钮或菜单项），只清空 `temp_dir` 下的下载中间产物（`.part` / `.tmp` / 残留分片等），
-        不再由添加任务的路径顺带执行，避免误删你正在分片下载的任务。建议在磁盘空间紧张时手动执行一次。
+        独立入口（按钮或菜单项），只清空 `temp_dir` 下的下载中间产物（`.part` / `.tmp` / 残留分片等），不再由添加任务的路径顺带执行，避免误删你正在分片下载的任务。建议在磁盘空间紧张时手动执行一次。
 
 5.5 M3U8 自动解析与变体展开
     当列表里加入一个主 m3u8 资源时，ResourcePanel 会自动启动后台线程 M3U8FetchThread：
@@ -432,11 +359,9 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 解析 #EXT-X-STREAM-INF。
         - 递归解析嵌套 master playlist（受 m3u8_nested_depth 限制）。
         - 生成各分辨率变体。
-
     解析完成后会发生两件事：
         1. 更新原始那一行的“清晰度”列，例如：1080p/720p/480p。
         2. 自动把各个变体作为新的资源行加到表格中，标题会带上 [1080p] 之类后缀。
-
     这意味着：
         用户既可以从原始 master 入口下载，也可以直接点某个具体分辨率变体下载。
 
@@ -446,28 +371,19 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
             - 优先使用 page_url，而不是 CDN 片段地址。
             - 弹出格式选择对话框。
             - 用户可选具体 format_id，或直接选“最佳质量”。
-
         B. 如果是 .m3u8
             - 弹出 M3U8 清晰度选择对话框。
             - 优先复用资源列表已经缓存的 variants，避免重复请求。
             - 若当前引擎是 N_m3u8DL-RE，会尽量传 master_url + selected_variant。
             - 若是其他引擎，直接使用选中的变体 URL 下载。
-
         C. 其他资源
             - 直接创建下载任务并入队。
-
     入队结果反馈（点击下载后的四种结果）：
-        无论走 A / B / C 哪条分支，最终都统一经由下载管理器的 `add_resource` 做入队，
-        界面会根据返回值展示以下四种明确结果之一，避免"点了没反应"：
+        无论走 A / B / C 哪条分支，最终都统一经由下载管理器的 `add_resource` 做入队，界面会根据返回值展示以下四种明确结果之一，避免"点了没反应"：
             - `queued`：新任务已正常入队，下载队列里会出现对应行，可在下载中心继续跟踪。
-            - `merged`：检测到已存在相同任务（按 url / 引擎 / 保存目录 / 标题生成的幂等键命中），
-                本次点击被合并到已有任务，不会再在队列里堆出第二条相同任务；状态栏提示"已合并到已有任务"。
-            - `needs_confirmation`：入队前的磁盘预检失败（默认要求目标盘可用空间 ≥ 预估大小 × 1.2），
-                程序会弹窗让你确认"继续下载 / 取消"，选择继续会以 `disk_precheck=bypassed` 记录审计；
-                不做选择时任务不会入队，避免写盘到半途失败。
-            - `failed`：URL / headers 经过与协议处理器相同的清洗后仍被拒绝（内网 / 云元数据地址、非 http(s) 协议、
-                URL 超长、headers 超长或含非法字符等），状态栏会提示失败原因，不会进入下载队列。
-
+            - `merged`：检测到已存在相同任务（按 url / 引擎 / 保存目录 / 标题生成的幂等键命中），本次点击被合并到已有任务，不会再在队列里堆出第二条相同任务；状态栏提示"已合并到已有任务"。
+            - `needs_confirmation`：入队前的磁盘预检失败（默认要求目标盘可用空间 ≥ 预估大小 × 1.2），程序会弹窗让你确认"继续下载 / 取消"，选择继续会以 `disk_precheck=bypassed` 记录审计；不做选择时任务不会入队，避免写盘到半途失败。
+            - `failed`：URL / headers 经过与协议处理器相同的清洗后仍被拒绝（内网 / 云元数据地址、非 http(s) 协议、URL 超长、headers 超长或含非法字符等），状态栏会提示失败原因，不会进入下载队列。
 5.7 yt-dlp 格式选择对话框怎么用
     实现方式：
         调用 yt-dlp -J 获取格式列表，再用 ui/format_dialog.py 弹窗显示。
@@ -477,12 +393,10 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 显示列：ID / 分辨率 / 格式 / 编码 / 大小。
         - 可双击一行直接确认。
         - 可点击“最佳质量”。
-
     使用方法：
         1. 点击支持站点资源的“下载”。
         2. 等待程序获取格式。
         3. 选择一行具体清晰度，点击“确认下载”，或直接点“最佳质量”。
-
 5.8 M3U8 清晰度选择对话框怎么用
     使用方法：
         1. 点击 m3u8 资源的“下载”。
@@ -502,13 +416,11 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - “更改位置”会打开目录选择对话框。
         - “打开目录”会直接用系统资源管理器打开目录。
         - 修改后会立刻写回 config.json。
-
     使用方法：
         1. 进入下载中心。
         2. 点击“更改位置”。
         3. 选择目录。
         4. 后续新任务将默认保存到此目录。
-
 6.2 线程数
     对应配置项：
         engines.n_m3u8dl_re.thread_count
@@ -519,25 +431,16 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     注意：
         - 这是单个任务的线程数，不是同时下载的任务数。
         - 对 yt-dlp / Streamlink 不直接等价生效。
-
     建议：
         - 网络正常时可适当提高。
         - 某些站点过高线程可能导致 403、限流或不稳定。
-
 6.3 重试次数
     对应两个层面：
-        A. 界面上的重试次数
-            engines.n_m3u8dl_re.retry_count
-            这个值会直接写给 N_m3u8DL-RE 作为引擎内部重试参数。
-
-        B. 下载管理器总重试次数
-            max_retry_attempts
-            这个值控制 DownloadManager 在任务级别整体最多尝试多少轮。
-
+        A. 界面上的重试次数engines.n_m3u8dl_re.retry_count这个值会直接写给 N_m3u8DL-RE 作为引擎内部重试参数。
+        B. 下载管理器总重试次数max_retry_attempts这个值控制 DownloadManager 在任务级别整体最多尝试多少轮。
     区别：
         - 引擎内部重试：某一个引擎命令内部自己重试。
         - 管理器级重试：引擎失败后，任务还可以再来一轮，甚至切换引擎。
-
 6.4 并发任务
     对应配置项：
         max_concurrent_downloads
@@ -548,12 +451,8 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     使用方法：
         - 调大：多个任务可同时下载，但更占带宽和磁盘资源。
         - 调小：更稳定，适合容易 403 或网络不稳的站点。
-
     动态调整：
-        把并发从 N 调到 M（M<N）时，程序会给最近启动的 N-M 个 worker 发出软退出信号，
-        它们会在当前任务完成后自然退出；若 30 秒内仍未退出，会记录一条 `worker_exit_timeout` 告警，
-        但不会强杀已经开始下载的任务。调大并发时会立刻增派新 worker；
-        界面上的 `active_workers` 始终反映真实存活数量。
+        把并发从 N 调到 M（M<N）时，程序会给最近启动的 N-M 个 worker 发出软退出信号，它们会在当前任务完成后自然退出；若 30 秒内仍未退出，会记录一条 `worker_exit_timeout` 告警，但不会强杀已经开始下载的任务。调大并发时会立刻增派新 worker；界面上的 `active_workers` 始终反映真实存活数量。
 
 6.5 限速
     对应配置项：
@@ -567,11 +466,9 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - Aria2：会转为 `--max-overall-download-limit={N}M`。
         - yt-dlp：会转为 `--limit-rate`（按 MB/s 展开）。
         - Streamlink：当前不按此参数做专门的下载限速。
-
     使用建议：
         - 遇到网络波动、掉线、证书/网关问题时，可适度限速。
         - 多任务下载时适当限速能提升整体稳定性。
-
 6.6 下载队列显示内容
     当前列为：
         - 文件名
@@ -579,14 +476,12 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 进度
         - 速度
         - 引擎
-
     状态可能包括：
         waiting / downloading / paused / failed / completed
 
     说明：
         - 直播录制类任务进度可能未知，此时会显示已下载大小或“录制中...”。
         - 状态文字和颜色会随任务状态变化。
-
 6.7 下载队列右键菜单与底部按钮
     当前支持：
         - 暂停
@@ -599,23 +494,20 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 清除已完成
         - 按状态排序
         - 批量导入
-
     右键菜单支持的附加操作：
         - 复制链接
         - 已完成任务可播放文件
-
+        - 已完成任务可 FFmpeg 后处理（封装为 MP4 / 压缩视频 / 提取字幕 / 合并音频）
     删除任务的实际行为：
         - 通知 DownloadManager 移除任务。
         - 如果进程还在，会终止下载进程。
         - 3 秒后尝试清理临时文件。
         - 不会主动删除已经完成的正式成品文件。
-
 6.8 批量导入
     支持输入：
         - http://
         - https://
         - magnet:
-
     使用方法：
         1. 点击“批量导入”。
         2. 每行输入一个链接。
@@ -645,19 +537,17 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - retry_count / max_retries
         - stop_requested / stop_reason
         - created_at / started_at / completed_at
-
     这表示：
         任务不仅保存最终下载地址，还保存来源清晰度、主播放列表地址、失败状态等上下文。
 
 7.2 引擎选择优先级
     综合判定顺序（优先级从高到低）：
         1. 用户在 UI 中手动指定的引擎（最高优先）。
-        2. 扩展名判定（判断前会先剥离 URL 上的 query string）。
-        3. HEAD 请求 MIME 探测（2 秒超时，受内网 / 云元数据过滤保护；
-           探测失败时回退到扩展名判定，并记录 `engine_select=fallback`）。
-        4. 直播平台名单命中（`LIVE_PLATFORMS`）。
-        5. 兜底使用 yt-dlp。
-
+        2. 上下文感知检测：根据 resource_type 和 mime 匹配（无需网络往返）。
+        3. HEAD 请求 MIME 探测（2 秒超时，受内网 / 云元数据过滤保护；探测失败时回退到扩展名判定，并记录 `engine_select=fallback`）。
+        4. 扩展名判定（判断前会先剥离 URL 上的 query string）。
+        5. 直播平台名单命中（`LIVE_PLATFORMS`）。
+        6. 兜底使用 yt-dlp。
     判定规则表（扩展名 + 直播平台）外置在 `resources/engine_rules.json`，可直接编辑，不需要改动代码。
 
     自动选择顺序当前为：
@@ -668,25 +558,19 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - Streamlink：更偏向直播平台 URL。
         - Aria2：更偏向直链文件和磁力。
         - yt-dlp：作为通用兜底和页面型视频平台下载器。
-
 7.3 任务入队与并发
     实现方式：
         DownloadManager 使用 Queue + 多个 worker 线程。
 
     流程：
-        1. 幂等预检：以 `sha1(url|engine|out_dir|title)` 为键查重，若已有同键任务则把本次请求合并到已有任务
-           （返回 `merged`），不会因反复右键"重新下载"而在队列里堆出多条相同任务。
-        2. 磁盘预检：从 manifest 读取估算大小（拿不到按 500 MB 计），与目标目录所在磁盘的可用空间比对，
-           不足时以 `needs_confirmation=insufficient_disk` 提示由你选择继续或取消；
-           选择"忽略预检"继续会记录 `disk_precheck=bypassed`。
+        1. 幂等预检：以 `sha1(url|engine|out_dir|title)` 为键查重，若已有同键任务则把本次请求合并到已有任务（返回 `merged`），不会因反复右键"重新下载"而在队列里堆出多条相同任务。
+        2. 磁盘预检：从 manifest 读取估算大小（拿不到按 500 MB 计），与目标目录所在磁盘的可用空间比对，不足时以 `needs_confirmation=insufficient_disk` 提示由你选择继续或取消；选择"忽略预检"继续会记录 `disk_precheck=bypassed`。
         3. add_task() 把任务状态设为 waiting。
         4. 根据当前设置和用户偏好选出首选引擎。
         5. worker 线程按并发上限取任务执行。
-
 7.4 HLS 预探测
     对应功能开关：
-        features.hls_probe_enabled
-        features.hls_probe_hard_fail
+        features.hls_probe_enabled features.hls_probe_hard_fail
 
     实现方式：
         对 m3u8 任务先调用 HLSProbe：
@@ -694,14 +578,12 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
             - 如果是 master，先取第一条变体
             - 检查 key URL
             - 检查第一片 segment 是否能访问
-
     作用：
         提前发现“playlist 能拿到但 key/ts 拿不到”的问题。
 
     硬失败开关含义：
         - True：预探测失败就直接判任务失败。
         - False：预探测失败只记日志，仍继续下载流程。
-
 7.5 候选链接优选
     对应功能开关：
         features.download_candidate_ranking_enabled
@@ -713,13 +595,9 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - https 加分
         - 带 referer / origin / cookie / authorization 加分
         - 看起来像广告、tracker 的 URL 减分
-
 7.6 重试与回退
     对应功能开关：
-        features.download_retry_enabled
-        features.download_engine_fallback
-        features.download_auth_retry_first
-        features.download_auth_retry_per_engine
+        features.download_retry_enabled features.download_engine_fallback features.download_auth_retry_first features.download_auth_retry_per_engine
 
     实际流程：
         1. 先尝试当前候选引擎。
@@ -728,91 +606,90 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         4. 如果允许回退，则继续尝试其他可用引擎。
         5. 如果允许任务级重试，则整轮失败后还能再来下一轮。
         6. timeout 类失败会按 backoff_seconds 做递增等待。
-
 7.7 任务暂停、继续、取消、删除
     停止响应时间：
-        点击"暂停 / 取消"后，所有引擎（N_m3u8DL-RE / yt-dlp / Streamlink / Aria2）会在 500 ms 内跳出读循环并调用 terminate()；
-        若 1.5 秒内仍未退出则递归 kill，典型全链路响应时间不超过 2 秒。
-        大文件 FFmpeg 合并过程中取消时会清理 `.part` / `.tmp` 等中间产物，
-        保留已经完成的上一步产物（例如分片已下完但合并未完成时，分片会被保留，便于下一次恢复）。
+        点击"暂停 / 取消"后，所有引擎（N_m3u8DL-RE / yt-dlp / Streamlink / Aria2）会在 500 ms 内跳出读循环并调用 terminate()；若 1.5 秒内仍未退出则递归 kill，典型全链路响应时间不超过 2 秒。大文件 FFmpeg 合并过程中取消时会清理 `.part` / `.tmp` 等中间产物，保留已经完成的上一步产物（例如分片已下完但合并未完成时，分片会被保留，便于下一次恢复）。
 
     暂停：
         - 标记 stop_requested=True
         - stop_reason=paused
         - 若有外部进程则终止之
         - 状态进入 paused
-
     继续：
         - 从 paused 列表移除
         - 重新 add_task() 入队
-
     取消：
         - stop_reason=cancelled
         - 终止进程
         - 状态最终作为 failed 处理
-
     删除：
         - stop_reason=removed
         - 从管理器状态 and 队列中移除
         - UI 侧后续会做临时文件清理
-
 7.8 下载指标与自动学习站点规则
     下载指标：
         DownloadManager 内部会累计 success_total / failed_total / by_engine / by_stage。
 
     自动学习站点规则：
         对应配置项：
-            site_rules_auto.enabled
-            site_rules_auto.max_rules
-            site_rules_auto.allow_cookie
+            site_rules_auto.enabled site_rules_auto.max_rules site_rules_auto.allow_cookie
 
-        当该功能开启后，成功任务中的 referer / user-agent / origin / cookie 可被抽取为自动规则，
-        以后访问同站点时可自动补头。
+        当该功能开启后，成功任务中的 referer / user-agent / origin / cookie 可被抽取为自动规则，以后访问同站点时可自动补头。
 
 
 ================================================================================
 8. 各下载引擎说明与使用建议
 ================================================================================
+
+8.0 上下文感知的自动引擎选择
+    当前程序已实现上下文感知的引擎选择。嗅探器检测到资源时，会记录检测来源（CatCatch /内置浏览器 / 手动）和资源类型（hls / dash / direct_video / segment / page）。这些上下文通过统一的 EngineSelectContext（定义在 core/download_context.py）流入引擎选择器，引擎选择器利用上下文在发起 HEAD MIME 探测之前就做出决策。
+
+    完整优先级链为：
+        1. 用户手动指定引擎（覆盖自动选择）
+        2. 上下文感知检测：根据 resource_type 和 mime 匹配
+        3. HEAD MIME 探测（2 秒超时）
+        4. 扩展名回退
+        5. 直播平台 URL 模式匹配
+        6. yt-dlp 兜底
+    这意味着 m3u8 资源直接路由到 N_m3u8DL-RE，mpd 到 N_m3u8DL-RE，直链视频到Aria2，页面型站点到 yt-dlp —— 全程无需额外的 HEAD 网络往返。
+
 8.1 N_m3u8DL-RE
     适合：
         - m3u8
         - mpd
         - HLS / DASH
         - 主列表 + 变体清晰度场景
-
     当前实现特点：
         - 启动前会读一次 --help，探测当前二进制支持哪些参数。
         - 会构造 primary / master / media 多个候选地址依次尝试。
         - 支持 safe mode 回退，处理参数不兼容情况。
         - 支持根据 selected_variant 传 --select-video。
         - 支持限速、线程数、重试次数、输出格式等。
-
     推荐使用：
         - m3u8 站点优先用它。
         - 想精确选清晰度时优先用它。
-
+    **手动下载**：如需手动安装，可从 GitHub Release 下载 `*win-x64*.zip` 并解压出 `N_m3u8DL-RE.exe` 放到 `bin` 目录：
+    - 仓库主页：https://github.com/nilaoda/N_m3u8DL-RE
+    - Release 下载页：https://github.com/nilaoda/N_m3u8DL-RE/releases
 8.2 yt-dlp
     适合：
         - YouTube / B站 / TikTok / Instagram / Twitter / Vimeo 等页面型站点
         - 需要页面解析、格式枚举、音视频合并的站点
-
     当前实现特点：
         - 可先获取格式列表，再让用户选 format_id。
         - 支持读取手工导出的 cookies 文件。
+        - 支持读取浏览器 cookies：可使用 Playwright 的 Chromium 用户数据目录（`--cookies-from-browser chromium:<数据目录>`），目录不存在时回退到系统 Chrome（`--cookies-from-browser chrome`）；也可使用 Firefox（`--cookies-from-browser firefox`）。
         - 格式或下载失败时会尝试回退到 Firefox cookies。
         - 遇到证书问题会自动加 --no-check-certificates 重试一次。
+        - 支持 generic impersonate（浏览器伪装）：通过 `--extractor-args generic:impersonate` 让 yt-dlp 用真实浏览器指纹发起请求，用于绕过 Cloudflare 等基于浏览器指纹的防护；该场景下还会以 `--add-header` 形式补传 Origin / Cookie。
         - 限速可从全局 speed_limit 继承。
-
     Cookies 实际使用方式：
         - 程序会根据 URL 推断 cookies 文件名，例如 youtube 对应 cookies/www.youtube.com_cookies.txt。
         - 若该文件存在，会优先使用。
-        - 精确匹配失败时，会按 `.` 边界做子域后缀回退：`music.youtube.com` 会先试 `music.youtube.com_cookies.txt`，
-          不存在则回退到 `youtube.com_cookies.txt`，再到 `com_cookies.txt`，直到命中或走完。
-        - 没有时会尝试 Firefox cookies 回退。
-
+        - 精确匹配失败时，会按 `.` 边界做子域后缀回退：`music.youtube.com` 会先试 `music.youtube.com_cookies.txt`，不存在则回退到 `youtube.com_cookies.txt`，再到 `com_cookies.txt`，直到命中或走完。
+        - 没有手工 cookies 文件时，会尝试浏览器 cookies 回退（Chromium / Chrome / Firefox）。
     控制台编码：
-        Windows 下 yt-dlp 的 stdout 按 utf-8（errors='replace'）→ mbcs（系统 ANSI code page，通常 CP936）→ latin-1 三级兜底解码；
-        实际用到 mbcs / latin-1 时会在日志里带上 `decode=mbcs` / `decode=lossy` 标记，避免静默丢字符。
+        Windows 下 yt-dlp 的 stdout 按 utf-8（errors='replace'）→ mbcs（系统 ANSI code page，通常 CP936）→ latin-1 三级兜底解码；实际用到 mbcs / latin-1 时会在日志里带上 `decode=mbcs` / `decode=lossy` 标记，避免静默丢字符。
 
     format_id 字符集（支持非数字格式 ID）：
         - 程序把用户 / 格式对话框选出的 `format_id` 传给 yt-dlp 前，会先按字符白名单做严格校验：允许 `[A-Za-z0-9_.+:\-]+`。
@@ -822,45 +699,63 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
             · HLS / DASH 前缀：`hls-720`、`dash-480`、`http-720p`、`avc1_4d401f`。
             · 冒号 / 下划线 / 点：`ec-3_audio`、`video:1080p`、`audio.original`。
         - 任何包含空格、换行、分号、管道、反引号、`$()`、`&`、`<>` 等 shell 元字符的字符串都会被拒绝并以 `invalid_format_id` 失败，不会被拼到命令行里；因此即使对话框被第三方篡改，也不会变成命令注入入口。
-
+    **手动下载**：如需手动安装，可从 GitHub Release 下载 `yt-dlp.exe` 放到 `bin` 目录：
+    - 仓库主页：https://github.com/yt-dlp/yt-dlp
+    - Release 下载页：https://github.com/yt-dlp/yt-dlp/releases
+    - 最新版直链：https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe
 8.3 Streamlink
     适合：
         - 直播平台
         - Twitch / Douyu / Huya / B站直播等直播 URL
-
     当前实现特点：
         - 输出通常保存为 .ts。
         - 没有精确总进度时，会显示已写入大小和速度。
         - 失败时会做简易原因诊断，如 401/403/超时/地理限制等。
-        - Cookie 会按 `;` 自动拆分：`a=1; b=2` 会拆成 `--http-cookie "a=1"` 与 `--http-cookie "b=2"` 两组参数，
-          值会经过 URL 转义；空白 name 或不含 `=` 的条目会被丢弃。
-
+        - Cookie 会按 `;` 自动拆分：`a=1; b=2` 会拆成 `--http-cookie "a=1"` 与 `--http-cookie "b=2"` 两组参数，值会经过 URL 转义；空白 name 或不含 `=` 的条目会被丢弃。
+    **手动下载**：如需手动安装，可从 GitHub Release 下载 `streamlink-*-x86_64.zip` 并解压出 `streamlink.exe` 放到 `bin` 目录：
+    - Windows 构建仓库：https://github.com/streamlink/windows-builds
+    - Release 下载页：https://github.com/streamlink/windows-builds/releases
+    - 主仓库（源码）：https://github.com/streamlink/streamlink
 8.4 Aria2
     适合：
         - mp4 / flv / webm / ts 等直链文件
         - magnet 磁力链接
-
     当前实现特点：
         - 支持多连接并行下载。
         - 继承全局限速。
         - 可附带 referer / user-agent / cookie 请求头。
-
+    **手动下载**：如需手动安装，可从 GitHub Release 下载 `*win-64bit*.zip` 并解压出 `aria2c.exe` 放到 `bin` 目录：
+    - 仓库主页：https://github.com/aria2/aria2
+    - Release 下载页：https://github.com/aria2/aria2/releases
 8.5 FFmpeg
     当前代码中的实际定位：
-        FFmpegProcessor 已加载，但主界面当前没有单独暴露“转码 / 合并 / 抽字幕 / 压缩”按钮。
+        FFmpegProcessor 已加载，已完成任务的右键菜单中暴露了"后处理"操作，包含转封装为 MP4、压缩视频、提取字幕、合并音频。后处理在后台线程执行，不阻塞 UI。
 
     已实现的方法包括：
         - 转封装为 MP4
         - 合并音视频
         - 提取字幕
         - 压缩视频
-
     说明：
-        它现在更像“已接入的后处理能力”，并非主界面高频入口功能。
+        通过下载队列中已完成任务的右键菜单触发，属于后处理入口功能。
 
     合并中取消：
-        大文件合并过程采用可取消的读循环；取消后会清理 `.part` / `.tmp` 等中间产物，
-        保留已经完成的上一步产物（例如分片已下完但合并未完成时，分片会被保留，便于下一次恢复）。
+        大文件合并过程采用可取消的读循环；取消后会清理 `.part` / `.tmp` 等中间产物，保留已经完成的上一步产物（例如分片已下完但合并未完成时，分片会被保留，便于下一次恢复）。
+
+    **手动下载**：如需手动安装，可从以下地址下载 `ffmpeg.exe` 放到 `bin` 目录：
+    - 官方仓库：https://github.com/FFmpeg/FFmpeg
+    - Windows 构建版（推荐，程序默认使用此源）：https://www.gyan.dev/ffmpeg/builds/  （下载 `ffmpeg-release-essentials.zip`，解压取出 `bin/ffmpeg.exe`）
+    - Release 下载页：https://github.com/FFmpeg/FFmpeg/releases
+
+### 8.6 Deno
+
+Deno 是一个现代的 JavaScript/TypeScript 运行时，M3U8D 使用它执行部分嗅探脚本（如需要运行 TypeScript 形式的注入脚本时）。属于可选依赖，缺失时嗅探器仍可工作，但部分站点的高级嗅探脚本可能无法运行。
+
+- 可执行文件位置：`bin/deno.exe`
+- 当前程序未配置自动更新，需手动下载维护
+**手动下载**：如需手动安装，可从 GitHub Release 下载 `deno-x86_64-pc-windows-msvc.zip` 并解压出 `deno.exe` 放到 `bin` 目录：
+- 仓库主页：https://github.com/denoland/deno
+- Release 下载页：https://github.com/denoland/deno/releases
 
 
 ================================================================================
@@ -878,19 +773,11 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 收到猫爪请求
         - 配置变更
         - 应用启动/关闭
-
     使用方法：
         - 当你觉得“点了没反应”时，先看这里。
         - 当下载失败时，先看这里的关键报错，再去日志文件夹查看完整日志。
-
     默认级别与调试开关：
-        文件级日志默认为 INFO；需要抓 DEBUG 请设环境变量 `M3U8D_LOG_DEBUG=1` 后重启程序。
-        命令行与 URL 中的敏感头（Cookie / Set-Cookie / Authorization / Proxy-Authorization / X-Session-Token /
-        User-Agent / Referer / Origin）以及 URL 查询参数里的 `token` / `sign` / `signature` / `auth` 在日志写盘前
-        会被替换为 `<redacted>`，不会以明文落盘。
-        排障需要明文时可设环境变量 `SECURITY_DEBUG=1` 启用独立的 `debug.sensitive.log`（默认关闭，调试完务必关闭）。
-        日志按日期自动滚动，跨零点会新建当天文件；总容量超限会触发节流轮转（每 1000 条或 5 秒检查一次），
-        即使开启高频 DEBUG 也不会拖慢下载。
+        文件级日志默认为 INFO；如果希望后台文件日志更少，可以设置环境变量 `M3U8D_LOG_LEVEL=WARNING`（只写 WARNING/ERROR/CRITICAL）或 `M3U8D_LOG_LEVEL=ERROR`（只写 ERROR/CRITICAL）后重启程序；需要排障抓 DEBUG 时才设置 `M3U8D_LOG_DEBUG=1`。其中 `M3U8D_LOG_LEVEL` 优先级高于 `M3U8D_LOG_DEBUG`。命令行与 URL 中的敏感头（Cookie / Set-Cookie / Authorization / Proxy-Authorization / X-Session-Token / User-Agent / Referer / Origin）以及 URL 查询参数里的 `token` / `sign` / `signature` / `auth` 在日志写盘前会被替换为 `<redacted>`，不会以明文落盘。排障需要明文时可设环境变量 `SECURITY_DEBUG=1` 启用独立的 `debug.sensitive.log`（默认关闭，调试完务必关闭）。日志按日期自动滚动，跨零点会新建当天文件；总容量超限会触发节流轮转（每 1000 条或 5 秒检查一次），即使开启高频 DEBUG 也不会拖慢下载。
 
 9.1.1 常见日志级别怎么看
     INFO：表示流程正在正常推进，或某一步已经成功完成。
@@ -941,29 +828,23 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - media_url
         - completed_at
         - cookie_file（如果当时存在）
-
     写入历史前的敏感头字段清理：
         `history.json` 在落盘前会先对 `headers` 做一次白名单外敏感字段剥离，避免把一次性令牌 / 凭证长期留在用户目录：
-            - 下列键（不区分大小写）会被整列删除，不会出现在 `history.json` 里：
-              `Cookie` / `Set-Cookie` / `Authorization` / `Proxy-Authorization` / `X-Session-Token` /
-              `X-Auth-Token` / `Token` / `Api-Key` / `X-Api-Key`。
+            - 下列键（不区分大小写）会被整列删除，不会出现在 `history.json` 里：`Cookie` / `Set-Cookie` / `Authorization` / `Proxy-Authorization` / `X-Session-Token` / `X-Auth-Token` / `Token` / `Api-Key` / `X-Api-Key`。
             - `Referer` / `User-Agent` / `Origin` / `Accept-Language` 等下载复用所需的字段会原样保留，便于"右键重新下载"仍然能带着正确上下文起步。
             - 这个剥离只发生在写入 `history.json` 前，运行中任务仍然持有完整 headers；因此清理后再点"重新下载"拿到的仍是剥离过的字段，如遇到鉴权失败，请按需要在站点规则或外部传入 headers 里重新补回 Cookie / Authorization。
-
     右键菜单支持：
         - 重新下载
         - 打开文件位置
         - 查看相关日志
         - 从历史删除
         - 复制文件名 / 复制 URL / 复制整行
-
 9.3 系统通知
     对应配置项：
         notification_enabled
 
     当前代码实际行为：
-        目前通知函数主要写日志，不真正弹系统通知气泡。
-        注释中保留了 plyer 方案，但默认未启用。
+        v0.5.0 起使用 Qt 原生 QSystemTrayIcon 实现系统通知气泡弹出，不再依赖 plyer，消除了 Windows 上调用 CMD 窗口闪烁的问题。跨线程通知通过 Qt 信号安全投递到主线程。
 
 
 ================================================================================
@@ -979,16 +860,11 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 优先 9527
         - 若被占用，会尝试 9528 ~ 9539
         - 全部候选端口都失败时，会记录 `bind_timeout` 或 `port_exhausted`，不会让 UI 卡住。
-
     认证与跨站防护：
-        - 启动时会随机生成一次性会话令牌（token）并写入 `~/.m3u8d/session.token`
-          （POSIX 下权限为 0600 / Windows 下使用 owner-only DACL），供可信客户端读取。
-        - 所有请求的 `Origin` / `Referer` 必须在白名单内；默认白名单为
-          `http://127.0.0.1` / `http://localhost` / `https://127.0.0.1` / `https://localhost` 四种 loopback 变体。
-        - `POST /download` 另外要求 `X-Session-Token` 头与当前会话令牌一致：缺失或错误返回 401；
-          `Origin` 不在白名单时返回 403，且不会回显任何 `Access-Control-Allow-*` 头。
+        - 启动时会随机生成一次性会话令牌（token）并写入 `~/.m3u8d/session.token`（POSIX 下权限为 0600 / Windows 下使用 owner-only DACL），供可信客户端读取。
+        - 所有请求的 `Origin` / `Referer` 必须在白名单内；默认白名单为`http://127.0.0.1` / `http://localhost` / `https://127.0.0.1` / `https://localhost` 四种 loopback 变体。
+        - `POST /download` 另外要求 `X-Session-Token` 头与当前会话令牌一致：缺失或错误返回 401；`Origin` 不在白名单时返回 403，且不会回显任何 `Access-Control-Allow-*` 头。
         - `Access-Control-Allow-Origin` 只会回显具体的白名单 Origin，不会是 `*`。
-
     URL 防护（SSRF 过滤）：
         - `POST /download` 接受到的 `url` 会先走一次公网地址校验（`ensure_public()`），下列目标会被直接以 **400 Bad Request** 拒绝，不会进入下载队列：
             · 回环地址：`127.0.0.0/8`、`::1`。
@@ -997,21 +873,16 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
             · 云元数据：`169.254.169.254`（IMDSv1/v2 入口）等常见云内网端点。
             · 非 `http` / `https` 协议、URL 超长（>4096）、或无法解析为 IP 的域名（查询失败时也视为不可信）。
         - 这条过滤和 `main.py --url` / 协议处理器走的是同一段清洗代码，因此从浏览器扩展 / 协议 / 命令行三条入口传入的 URL 防护口径一致。
-
     内部标记字段保护（不接受外部 `_` 前缀头）：
         - 程序内部会把一次性提示信息（例如"这次任务使用哪个 cookies 文件"）以 `_cookie_file` 这种下划线前缀键临时挂在 headers 字典上，仅供引擎侧使用。
         - `POST /download` 的 `headers` 字段在进入转发前，会把所有以 `_` 开头的键整列丢弃，不会被外部调用方利用"看起来像内部字段"的键绕过白名单或把任意本地路径注入到引擎命令行。协议处理器 `m3u8dl://` 的 JSON 载荷同样走这条剥离路径。
         - 因此浏览器扩展、外部脚本、协议处理器都无法通过 JSON 里写一个 `_cookie_file: C:\... ` 来让程序去读任意文件；真正的 cookie 文件路径只能由程序内部按 URL 推断得到。
-
     转发到引擎的 headers 清洗：
         - 名称只允许 `[A-Za-z0-9-]` 且长度 ≤64；值不得含 `\r \n \0` 且长度 ≤4096。
         - 仅允许转发白名单字段：Referer / User-Agent / Origin / Cookie / Accept-Language，其他字段会被静默丢弃。
         - 转发到引擎命令行时始终使用参数化数组，绝不字符串拼接。
-
     请求大小限制：
-        `POST /download` 的请求体上限为 **64 KiB**。超过上限时服务端直接返回 **413 Request Entity Too Large**，
-        并在日志里记录 `catcatch_body_too_large` 事件；浏览器扩展正常载荷（URL + headers + filename，一般只有几 KiB）
-        相对这个上限有充足余量，不会误伤。
+        `POST /download` 的请求体上限为 **64 KiB**。超过上限时服务端直接返回 **413 Request Entity Too Large**，并在日志里记录 `catcatch_body_too_large` 事件；浏览器扩展正常载荷（URL + headers + filename，一般只有几 KiB）相对这个上限有充足余量，不会误伤。
 
     接口：
         GET /
@@ -1024,15 +895,13 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
             该 GET 入口已改为返回 **405 Method Not Allowed**，不再触发任何下载动作。原因是只读 GET 没有会话令牌保护，为避免绕过认证，程序把下载请求统一收敛到 `POST /download` + `X-Session-Token` 这条认证路径。外部调用方请改用 POST；`GET /` 与 `GET /status` 两个只读状态接口仍然可用，无需认证。
 
         POST /download
-            可传 JSON 或 form。
-            支持字段：url / headers / name / filename
+            可传 JSON 或 form。支持字段：url / headers / name / filename
 
     收到请求后的实际行为：
         1. 先构造一个资源对象。
         2. 加入资源列表。
         3. 切换到资源列表页。
         4. 在状态栏提示已收到下载请求。
-
 10.2 m3u8dl:// 协议处理器
     协议处理脚本为 protocol_handler.pyw。
 
@@ -1040,35 +909,24 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         1. m3u8dl:"URL" --save-dir ... --save-name ... -H "Header: Value"
         2. m3u8dl://http://example.com/xxx.m3u8
         3. m3u8dl://{"url":"...","headers":{},"name":"..."}
-
     实际执行流程：
         1. 解析传入协议内容。
-        2. 读取 `~/.m3u8d/session.token` 作为 `X-Session-Token`，并携带 `Origin: http://127.0.0.1`，
-           向候选端口 9527..9539 逐一发起 `POST /download`；任一端口返回 2xx 即视为握手成功，
-           不会再启动新的主程序实例。
-        3. 全部候选端口都握手失败（主程序确实未在运行 / 令牌文件缺失 / 令牌已失效）时，才启动 `main.py`
-           并传入 `--url` / `--headers` / `--filename`。
+        2. 读取 `~/.m3u8d/session.token` 作为 `X-Session-Token`，并携带 `Origin: http://127.0.0.1`，向候选端口 9527..9539 逐一发起 `POST /download`；任一端口返回 2xx 即视为握手成功，不会再启动新的主程序实例。
+        3. 全部候选端口都握手失败（主程序确实未在运行 / 令牌文件缺失 / 令牌已失效）时，才启动 `main.py`并传入 `--url` / `--headers` / `--filename`。
         4. 新进程起来后会在 12 秒内轮询 send_to_app，把链接送进新实例的资源列表。
-
     日志脱敏：
-        协议处理器日志 `logs/protocol_handler.log` 不会以明文记录令牌，只保留
-        `token_loaded=<bool>` / `token_len=<int>` / `status_code=<int>` / `auth_ok=<bool>` 等脱敏元信息。
+        协议处理器日志 `logs/protocol_handler.log` 不会以明文记录令牌，只保留`token_loaded=<bool>` / `token_len=<int>` / `status_code=<int>` / `auth_ok=<bool>` 等脱敏元信息。
 
     紧急回滚：
-        如果某些环境暂时不适用握手（例如令牌文件被安全软件隔离但主程序仍在运行），可以把环境变量
-        `M3U8D_HANDOFF_LEGACY=1` 设上，暂时退化为旧行为（不读令牌、不设 Origin、只看 2xx）；
-        每次调用会额外记一行 legacy 标记便于发现。默认关闭，诊断完后请解除该环境变量。
+        如果某些环境暂时不适用握手（例如令牌文件被安全软件隔离但主程序仍在运行），可以把环境变量`M3U8D_HANDOFF_LEGACY=1` 设上，暂时退化为旧行为（不读令牌、不设 Origin、只看 2xx）；每次调用会额外记一行 legacy 标记便于发现。默认关闭，诊断完后请解除该环境变量。
 
     使用场景：
         - 浏览器扩展一键把资源发回桌面程序。
         - 外部脚本或工具调用系统协议。
-
     猫爪 URL Protocol 推荐设置：
         - Enable m3u8dl:// Download m3u8 or mpd：N_m3u8DL-RE
         - Confirm Parameters：启用
-        - Parameter Setting：
-          "${url}" --save-dir "%USERPROFILE%\Downloads\m3u8dl" --save-name "${title}_${now}" ${referer|exists:'-H "Referer:*"'} ${cookie|exists:'-H "Cookie:*"'} --no-log
-
+        - Parameter Setting："${url}" --save-dir "%USERPROFILE%\Downloads\m3u8dl" --save-name "${title}_${now}" ${referer|exists:'-H "Referer:*"'} ${cookie|exists:'-H "Cookie:*"'} --no-log
     配置说明：
         - `${url}`：猫爪捕获到的真实资源地址。
         - `--save-dir`：传递给协议内容中的目标保存目录。
@@ -1076,67 +934,48 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - `${referer|exists:...}`：若猫爪拿到了 Referer，则自动附带 `-H "Referer:*"`。
         - `${cookie|exists:...}`：若猫爪拿到了 Cookie，则自动附带 `-H "Cookie:*"`。
         - `--no-log`：作为兼容透传参数保留，当前协议解析会忽略它，不影响导入。
-
     使用前提：
         1. 先执行 scripts\register_protocol.bat 完成 `m3u8dl://` 协议注册。
         2. 再把以上参数填入猫爪的 URL Protocol m3u8dl 设置。
         3. 之后在猫爪中发送资源时，程序会自动接收并加入资源列表。
- 
- 
+
+
 ================================================================================
 11. config.json 全部主要设置项与使用方法
 ================================================================================
 11.1 基础目录与全局任务设置
     download_dir
-        含义：默认下载目录。
-        使用方法：
+        含义：默认下载目录。使用方法：
             - 可在 UI 的“保存位置”直接改。
             - 也可手改 config.json。
-
     temp_dir
-        含义：临时目录，N_m3u8DL-RE 等中间文件会使用它。
-        使用方法：
+        含义：临时目录，N_m3u8DL-RE 等中间文件会使用它。使用方法：
             - 建议放在本地 SSD 路径。
             - 空间不足时可改到其他盘。
-
     max_concurrent_downloads
-        含义：同时运行的任务数。
-        使用方法：
+        含义：同时运行的任务数。使用方法：
             - UI 中“并发任务”会直接改这个值。
-
     speed_limit
-        含义：全局限速，单位 MB/s，0 表示不限速。
-        使用方法：
+        含义：全局限速，单位 MB/s，0 表示不限速。使用方法：
             - UI 中“限速”会直接改这个值。
-
     max_retry_attempts
-        含义：任务级最大重试轮数。
-        建议：
+        含义：任务级最大重试轮数。建议：
             - 稳定站点 1~3 即可。
             - 易掉线站点可适当加大。
-
     retry_backoff_seconds
-        含义：任务级重试之间的等待秒数。
-        说明：
+        含义：任务级重试之间的等待秒数。说明：
             - timeout 类型失败会按此值递增退避。
-
 11.2 site_rules 与自动学习规则
     site_rules
         含义：按域名/关键词自动补 Referer、UA、Cookie、Authorization 等头。
 
         单条规则常见字段：
-            name
-            domains
-            url_keywords
-            referer
-            user_agent
-            headers
+            name domains url_keywords referer user_agent headers
 
         典型用途：
             - 某站 m3u8 必须带 referer。
             - 某站必须带固定 UA。
             - 某站需要 authorization 或 cookie。
-
     site_rules_auto.enabled
         含义：是否允许程序从成功任务中自动学习规则。
 
@@ -1144,22 +983,17 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         含义：自动学习最多保留多少条规则。
 
     site_rules_auto.allow_cookie
-        含义：自动学习时是否允许把 Cookie 一并写入规则。
-        提醒：
+        含义：自动学习时是否允许把 Cookie 一并写入规则。提醒：
             - 开启后更方便，但也更容易把短期 Cookie 固化进配置。
-
 11.3 features：功能开关逐项说明
     sniffer_rules_enabled
-        含义：嗅探阶段是否应用 site_rules 补头。
-        建议：一般保持 true。
+        含义：嗅探阶段是否应用 site_rules 补头。建议：一般保持 true。
 
     sniffer_dedup_enabled
-        含义：是否启用资源去重。
-        建议：一般保持 true，否则列表容易爆量。
+        含义：是否启用资源去重。建议：一般保持 true，否则列表容易爆量。
 
     sniffer_filter_noise
-        含义：保留给网络拦截器的噪声过滤开关。
-        说明：当前主抓流链路主要是 Playwright，QWebEngine 拦截器不是主路径。
+        含义：保留给网络拦截器的噪声过滤开关。说明：当前主抓流链路主要是 Playwright，QWebEngine 拦截器不是主路径。
 
     download_retry_enabled
         含义：是否允许任务级重试。
@@ -1182,6 +1016,9 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     hls_probe_hard_fail
         含义：HLS 预探测失败时是否直接判定任务失败。
 
+    allow_segment_probe_soft_fail
+        含义：HLS 预探测中，单个 TS 分段探测失败（如部分 CDN 对分段 HEAD 返回 403/404）但播放列表本身可访问时，是否按软失败处理（仅告警、不阻断下载）。说明：默认 true，对应日志中的 `hls_probe_soft_fail`。
+
     browser_capture_window_enabled
         含义：是否启用播放后持续探测窗口。
 
@@ -1201,8 +1038,61 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         含义：是否显示资源列表的搜索和筛选栏。
 
     m3u8_nested_depth
-        含义：解析嵌套 master playlist 的最大深度。
-        说明：虽然默认配置文件里未必显式写出，但代码支持这个 feature。
+        含义：解析嵌套 master playlist 的最大深度。说明：虽然默认配置文件里未必显式写出，但代码支持这个 feature。
+
+    network_verify_tls
+        含义：是否校验 HTTPS / TLS 证书。说明：默认开启；m3u8 解析与 HLS 预探测都会读取此项决定是否验证 TLS。仅在证书异常且确认目标可信时才关闭。
+
+    failure_strategy_enabled
+        含义：是否启用失败策略总开关。
+
+    rate_limit_low_concurrency_enabled
+        含义：检测到 CDN 限流（429）时是否自动降低 Aria2 连接数 / N_m3u8DL-RE 线程数重试。
+
+    download_rate_limit_backoff_multiplier
+        含义：限流回退时连接数的缩减乘数，默认 3。
+
+    adaptive_low_concurrency_enabled
+        含义：是否根据历史限流记录自适应降低特定 host 的并发线程数。
+
+    hls_probe_extended_soft_fail_enabled
+        含义：HLS 预探测中密钥探测返回 429 时按软失败处理（仅告警、不阻断下载）。
+
+    enhanced_header_capture_enabled
+        含义：是否捕获并转发额外的浏览器上下文 Header（Sec-Fetch-* 等）以提高反盗链场景成功率。
+
+    exact_request_header_replay_enabled
+        含义：是否在下载时精确回放嗅探阶段捕获的原始请求头。
+
+    forward_cookie_headers
+        含义：是否向引擎转发 Cookie 头。默认开启。
+
+    forward_authorization_headers
+        含义：是否向引擎转发 Authorization 头。默认关闭（fail-closed），仅在确信需要时开启。
+
+    temporary_cookie_forwarding_enabled
+        含义：是否允许从浏览器临时复用 Cookie 传递给下载引擎。默认关闭。
+
+    resource_domain_cookie_lookup_enabled
+        含义：是否按资源域名从浏览器 Cookie 存储中查找匹配 Cookie。
+
+    segment_suppression_enabled
+        含义：是否启用分段资源压制（超过阈值的同组 TS 分段不在资源列表中逐条显示）。
+
+    segment_suppression_threshold
+        含义：分段压制阈值，同组分段超过此数量时折叠显示。默认 3。
+
+    segment_advanced_view_enabled
+        含义：是否在资源列表中显示被压制的分段（高级视图）。默认关闭。
+
+    ephemeral_m3u8_refresh_enabled
+        含义：是否在检测到签名 URL 即将过期时自动刷新获取新 URL。默认关闭。
+
+    ephemeral_m3u8_refresh_timeout_ms
+        含义：临时 m3u8 刷新超时毫秒数。默认 15000。
+
+    playlist_diagnostics_enabled
+        含义：是否在嗅探时自动分析 m3u8 播放列表的 DRM 系统类型和签名 URL 到期风险。
 
 11.4 engines.n_m3u8dl_re
     path
@@ -1232,6 +1122,9 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     no_date_info
         含义：若启用，则尝试传 --no-date-info。
 
+    low_concurrency_thread_count
+        含义：检测到限流后回退使用的低线程数，默认 1。
+
 11.5 engines.ytdlp / streamlink / aria2 / ffmpeg
     engines.ytdlp.path
         yt-dlp 路径。
@@ -1248,46 +1141,47 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     engines.aria2.split
         分片数。
 
+    engines.aria2.low_connection_count
+        检测到限流后回退使用的低连接数，默认 1。
+
     engines.ffmpeg.path
         FFmpeg 路径。
 
 11.6 其他配置项
     notification_enabled
-        含义：是否记录通知事件。
-        说明：当前主要影响通知函数是否执行日志通知逻辑。
+        含义：是否记录通知事件。说明：当前主要影响通知函数是否执行日志通知逻辑。
 
     auto_delete_temp
-        含义：配置中存在该项。
-        说明：当前主下载流程没有直接按它做统一开关判断，更多是预留/扩展项。
+        含义：是否在分段型引擎任务成功完成后自动清理下载临时目录。说明：开启时，主下载流程会在 N_m3u8DL-RE / ffmpeg 任务完成后调用临时文件清理逻辑；
+              清理会跳过其它运行中或暂停任务的同名产物，避免误删并行下载残留。关闭时，临时文件仅通过“清空临时文件”入口手动清理。
 
     proxy.enabled / proxy.http / proxy.https
-        含义：代理配置项已存在于配置结构中。
-        说明：当前主下载和浏览器链路未直接按这些值统一下发代理参数，更多属于预留配置。
+        含义：是否为下载引擎与轻量网络探测启用统一代理。说明：开启后，主下载流程会把代理透传到 N_m3u8DL-RE、yt-dlp、Aria2、Streamlink 的命令行参数；
+              m3u8 解析、HLS 预探测与直链 HEAD 估算也会使用同一代理配置。`proxy.http` / `proxy.https` 需填写合法的 http、https、socks4、socks5 或 socks5h 代理 URL。
 
     catcatch.port
         含义：若配置中提供，可指定 CatCatchServer 首选端口；默认是 9527。
 
+    security.allow_private_networks
+        含义：是否允许 m3u8 解析、资源嗅探、HLS 预探测与 HEAD MIME 探测访问内网 / 保留地址（127/10/172.16-31/192.168/169.254/::1/fc00::/fe80:: 等）。说明：默认 false（按 SSRF 防护拒绝非公网地址）；仅在确需访问企业内网反向代理对外提供的公网域名时设为 true，开启后日志会打印 `ssrf_private_allowed` 告警，提示这是一条降权路径。一般用户请保持默认。
 
 11.7 环境变量
     以下环境变量会影响运行时行为，默认全部关闭；修改后需重启程序才会生效。
 
     M3U8D_LOG_DEBUG
-        含义：设为 `1` 时把文件级日志从默认 INFO 提升到 DEBUG。
-        说明：正常使用建议保持关闭，只在需要抓详细运行细节时开启。
+        含义：设为 `1` 时把文件级日志从默认 INFO 提升到 DEBUG。说明：正常使用建议保持关闭，只在需要抓详细运行细节时开启。
+
+    M3U8D_LOG_LEVEL
+        含义：显式设置文件日志级别，例如 `WARNING` 或 `ERROR`。说明：想让 `m3u8sniffer.log` 少一些时建议设为 `WARNING`；只关心错误时可设为 `ERROR`。该项优先于 `M3U8D_LOG_DEBUG`。
 
     SECURITY_DEBUG
-        含义：设为 `1` 时启用独立的 `debug.sensitive.log`，用于排障时记录命令行与敏感头的原始内容。
-        说明：该文件会与主日志同目录但单独存放；调试完成后应及时关闭该环境变量或删除该文件，
-        避免敏感信息长期留在磁盘上。
+        含义：设为 `1` 时启用独立的 `debug.sensitive.log`，用于排障时记录命令行与敏感头的原始内容。说明：该文件会与主日志同目录但单独存放；调试完成后应及时关闭该环境变量或删除该文件，避免敏感信息长期留在磁盘上。
 
     M3U8D_HANDOFF_LEGACY
-        含义：设为 `1` 时协议处理器退化为旧行为（不读令牌、不设 Origin、只看 2xx），
-        作为 `m3u8dl://` 投递异常时的紧急回滚通道。日常请保持关闭。
+        含义：设为 `1` 时协议处理器退化为旧行为（不读令牌、不设 Origin、只看 2xx），作为 `m3u8dl://` 投递异常时的紧急回滚通道。日常请保持关闭。
 
     M3U8D_SECURITY_DIAGNOSTIC
-        含义：设为 `1` 且同时在配置中把 `security.allow_weak_manifest_verification` 设为 true 时，
-        允许组件更新在诊断模式下放宽 manifest 校验。
-        说明：仅用于离线诊断；正常环境下必须两者都保持关闭。
+        含义：设为 `1` 且同时在配置中把 `security.allow_weak_manifest_verification` 设为 true 时，允许组件更新在诊断模式下放宽 manifest 校验。说明：仅用于离线诊断；正常环境下必须两者都保持关闭。
 
 
 ================================================================================
@@ -1301,33 +1195,28 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     5. 切到资源列表。
     6. 选择资源，点下载。
     7. 在下载中心查看进度和日志。
-
 12.2 下载 YouTube / B站等页面型视频
     1. 打开对应视频页面。
     2. 等页面型资源进入资源列表。
     3. 点下载。
     4. 在格式选择框中选清晰度或点“最佳质量”。
     5. 若站点要求登录，准备对应 cookies 文件更稳。
-
 12.3 下载 m3u8 多清晰度视频
     1. 让程序抓到 m3u8 资源。
     2. 等待资源列表清晰度列更新。
     3. 选择原始 master 或某个具体变体。
     4. 点下载。
     5. 在弹窗里确认目标清晰度。
-
 12.4 用磁力链接下载
     1. 把 magnet 链接粘贴到地址栏。
     2. 回车。
     3. 资源进入资源列表。
     4. 点击下载，程序通常会使用 Aria2。
-
 12.5 从历史记录重新下载
     1. 打开下载中心。
     2. 切到“下载历史”。
     3. 右键目标记录。
     4. 选择“重新下载”。
-
 12.6 使用 CatCatch 或协议回传
     1. 保持程序运行。
     2. 浏览器扩展把 URL 发给本地 HTTP API，或通过 m3u8dl:// 调起程序。
@@ -1344,32 +1233,27 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
         - 是否被弹出了格式选择框但你没确认。
         - 是否本地已存在同名文件，程序正在等待是否覆盖。
         - 是否 HLS 预探测失败并被 hls_probe_hard_fail 直接拦截。
-
 13.2 能抓到页面但抓不到资源
     建议：
         - 确认已点击“启动浏览器”。
         - 在外部浏览器里真的播放视频，而不是只停留在详情页。
         - 等待几秒，让捕获窗口进行持续扫描。
         - 必要时切换清晰度或刷新后重试。
-
 13.3 YouTube/B站资源不完整或无法下载
     建议：
         - 尽量让列表中出现页面型资源，再用 yt-dlp 下载。
         - 准备对应网站的 cookies 文件。
         - 若格式获取失败，程序会尝试 Firefox cookies 回退。
-
 13.4 m3u8 下载失败
     常见原因：
         - referer / cookie 不完整
         - key 或 ts 分片无权限
         - 站点对线程数过高敏感
-
     建议：
         - 配置 site_rules。
         - 降低线程数、并发 and 限速。
         - 使用 N_m3u8DL-RE 优先尝试。
         - 查看运行日志 and logs 目录下完整日志。
-
 13.5 下载失败后为什么会换引擎
     因为当前默认启用了：
         features.download_engine_fallback = true
@@ -1381,13 +1265,9 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
     因为历史记录不仅存了 URL，还会尽量保存 headers、engine、save_dir、selected_variant、master_url、media_url 等上下文。
 
 13.7 内网或局域网地址无法下载
-    为了降低通过本程序访问内网 / 云元数据（`127.0.0.1`、`10.x`、`172.16/12`、`192.168.x`、`169.254.x`、
-    `fc00::/7` 等）的风险，m3u8 解析与抓取默认拒绝非公网地址。
-    日志里会看到 `SSRFBlocked` 或 `ssrf_blocked` 这类标记。
+    为了降低通过本程序访问内网 / 云元数据（`127.0.0.1`、`10.x`、`172.16/12`、`192.168.x`、`169.254.x`、`fc00::/7` 等）的风险，m3u8 解析与抓取默认拒绝非公网地址。日志里会看到 `SSRFBlocked` 或 `ssrf_blocked` 这类标记。
 
-    如果你确实是在企业内网通过反向代理对外提供的公网域名下载，可以在 `config.json` 的 `features` 中
-    把 `allow_private_networks` 设为 `true` 并重启程序。
-    日志会打印显著告警，提示这是一条“降权”路径。一般用户请保持默认的 `false`。
+    如果你确实是在企业内网通过反向代理对外提供的公网域名下载，可以在 `config.json` 的 `security` 节点下把 `allow_private_networks` 设为 `true` 并重启程序。日志会打印显著告警，提示这是一条“降权”路径。一般用户请保持默认的 `false`。
 
 
 ================================================================================
@@ -1396,12 +1276,16 @@ Windows 10 / 11 64 位、Python 3.9+、pip、requirements.txt 全部依赖、Goo
 以下内容是“代码已存在但不一定完全在主界面高频使用”的能力：
     - FFmpegProcessor 已加载，但主界面没有独立后处理按钮。
     - QWebEngine NetworkInterceptor 类存在，但当前主抓流主路径是 PlaywrightDriver。
-    - auto_delete_temp / proxy 等配置项已存在，但当前主流程未统一完整接管这些项。
+    - auto_delete_temp / proxy 等配置项已存在并已接入主流程：auto_delete_temp 会在分段型引擎（N_m3u8DL-RE / ffmpeg）任务成功后自动清理该任务的临时分片；proxy 会透传到 N_m3u8DL-RE、yt-dlp、Aria2、Streamlink 的命令行参数，m3u8 解析、HLS 预探测与直链 HEAD 估算也会使用同一代理配置。
     - 浏览器页的后退 / 前进 / 刷新兼容接口仍是占位实现，不属于完整导航控制。
-
 以上说明的目的：
     让你在阅读本手册时，以当前程序实际可见行为和已接入代码为准，而不是把所有预留类都当成已完整对外功能。
 
+v0.5.0 新增并已全面接入的模块（2026-06）：
+    - core/download_context.py — 统一的 EngineSelectContext 数据类已完整接入 CatCatch和内置浏览器两条检测链路，上下文从资源发现端到端流经引擎选择最终写入 DownloadTask。
+    - core/engine_selector.py 上下文感知引擎选择 — _decide_from_context() 已激活并插入 HEAD MIME 探测之前的优先级链。
+    - core/playwright_driver.py 双信号设计（旧 resource_detected + 新 resource_context_detected）在保持向后兼容的同时启用了新的上下文富路径。
+    - _start_download() 自动回填 — 确保格式对话框、清晰度对话框等旧调用点也能从原始M3U8Resource 继承上下文，不会丢失。
 
 ================================================================================
 15. 建议的日常使用顺序

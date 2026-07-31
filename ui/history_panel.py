@@ -24,6 +24,9 @@ from utils.i18n import i18n, TR
 #     when the user retries an old task. That is a deliberate tradeoff:
 #     a Cookie that unlocks a membership site has a much shorter
 #     lifetime than a history JSON file typically does.
+#   * Cookie/auth policy markers are runtime-only and are stripped with
+#     the sensitive values so a history retry cannot silently reuse old
+#     temporary authorization.
 _HISTORY_STRIP_HEADER_KEYS: frozenset = frozenset(
     {
         "cookie",
@@ -31,6 +34,17 @@ _HISTORY_STRIP_HEADER_KEYS: frozenset = frozenset(
         "authorization",
         "proxy-authorization",
         "x-session-token",
+        "_allow_authorization_header",
+    }
+)
+_HISTORY_STRIP_RUNTIME_POLICY_KEYS: frozenset = frozenset(
+    {
+        "temporary_cookie_allowed",
+        "cookie_policy_source",
+        "auth_policy_source",
+        "_temporary_cookie_allowed",
+        "_cookie_policy_source",
+        "_auth_policy_source",
     }
 )
 
@@ -51,6 +65,8 @@ def _redact_headers_for_history(headers: dict | None) -> dict:
         if not isinstance(name, str):
             continue
         if name.lower() in _HISTORY_STRIP_HEADER_KEYS:
+            continue
+        if name.lower() in _HISTORY_STRIP_RUNTIME_POLICY_KEYS:
             continue
         # Drop the internal cookie-file marker — the surrounding code
         # mirrors it into record['cookie_file'] already, keeping it in

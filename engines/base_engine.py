@@ -95,10 +95,47 @@ _QUEUE_MAXSIZE = 1024
 # Main-loop queue.get timeout — keeps stop-request latency < 100ms.
 _GET_TIMEOUT = 0.1
 
+
+def _get_stop_terminate_grace() -> float:
+    """Return the tunable terminate→kill grace period in seconds."""
+    try:
+        from utils.tunables import tunables
+        return float(tunables.stop_terminate_grace_s)
+    except Exception:
+        return 0.5
+
+
+def _get_stop_kill_deadline() -> float:
+    """Return the tunable total stop deadline in seconds."""
+    try:
+        from utils.tunables import tunables
+        return float(tunables.stop_kill_deadline_s)
+    except Exception:
+        return 1.5
+
+
+def _get_pump_join_timeout() -> float:
+    """Return the tunable pump-thread join timeout in seconds."""
+    try:
+        from utils.tunables import tunables
+        return float(tunables.pump_join_timeout_s)
+    except Exception:
+        return 0.25
+
+
+def _get_pump_put_timeout() -> float:
+    """Return the tunable pump enqueue timeout in seconds."""
+    try:
+        from utils.tunables import tunables
+        return float(tunables.pump_put_timeout_s)
+    except Exception:
+        return 5.0
+
+
 # Grace period between terminate() and escalating to kill_process_tree.
-# 0.5s grace per task AC, 1.5s total wall-clock budget.
-_TERMINATE_GRACE = 0.5
-_KILL_DEADLINE = 1.5
+# Read from tunables at call-site via _get_stop_*() helpers.
+_TERMINATE_GRACE = 0.5   # compile-time default (kept for module-level refs)
+_KILL_DEADLINE = 1.5     # compile-time default (kept for module-level refs)
 
 # Maximum wait for the _pump threads to flush after proc exits. The pumps
 # already hit EOF the moment the child process closes its pipes; 0.25s is
@@ -109,6 +146,24 @@ _PUMP_JOIN_TIMEOUT = 0.25
 # Defends against a wedged ``on_line`` callback from permanently blocking the
 # producer.
 _PUT_TIMEOUT = 5.0
+
+# Pump read chunk size. Non-Windows paths still use a moderate chunk. Windows
+# anonymous pipes are probed with ``PeekNamedPipe`` first and then read with the
+# exact currently-available byte count so CR progress rows are not held until a
+# 4 KiB read fills or the child exits.
+_PUMP_READ_SIZE = 4096
+
+# Safety valve for tools that emit long binary/ANSI blobs without CR/LF. Normal
+# progress is dispatched on delimiters; this cap prevents unbounded growth while
+# preserving real-time-ish delivery for pathological lines.
+_PUMP_MAX_BUFFER_BYTES = 64 * 1024
+
+# Some console tools (notably N_m3u8DL-RE 0.6.x) flush progress rows to an
+# anonymous Windows pipe without any CR/LF delimiter.  If we wait for a newline
+# or the large safety valve above, the UI sees 0% until the child exits.  Once a
+# delimiter-less buffer is large enough to contain a real progress row and the
+# pipe has gone idle, dispatch that partial buffer as a real-time chunk.
+_PUMP_PARTIAL_FLUSH_MIN_BYTES = 32
 
 
 # Decode telemetry throttle (task 20.1). Emitting a DEBUG line for every GBK /
@@ -127,7 +182,7 @@ _decode_lossy_count = 0
 # ---------------------------------------------------------------------------
 
 
-def _decode_line(raw: bytes) -> str:
+def _decode_line(raw: bytes | str) -> str:
     """Best-effort byte→text decode for engine output.
 
     3-step ladder per Requirement 20.1 / task 20.1:
@@ -143,7 +198,13 @@ def _decode_line(raw: bytes) -> str:
     source stream produced; the :meth:`BaseEngine.read_loop` consumer is
     responsible for trimming the line-terminator for display while keeping
     ``\\r`` progress markers intact (Requirement 20.3).
+
+    ISS-17: input may already be ``str`` when called from test mocks or
+    defensive fallback paths; passthrough to avoid ``'str' object has no
+    attribute 'decode'`` (R31.1).
     """
+    if isinstance(raw, str):
+        return raw
 
     try:
         return raw.decode("utf-8")
@@ -165,6 +226,45 @@ def _decode_line(raw: bytes) -> str:
     # tightens the codec behavior.
     _record_decode_telemetry("lossy")
     return raw.decode("latin-1", errors="replace")
+
+
+def _peek_named_pipe_available(stream: Any) -> int | None:
+    """Return bytes currently available in a Windows pipe, or ``None``.
+
+    ``FileIO.read(4096)`` against Windows anonymous pipes can wait for a large
+    block even though a child process has already flushed a small CR progress
+    row.  ``PeekNamedPipe`` lets the pump read only the bytes that are available
+    now; when the pipe has no data we still do a blocking one-byte read so EOF
+    and future writes wake the pump naturally.  Non-Windows platforms and test
+    doubles that do not expose a real OS handle fall back to the normal reader.
+    """
+
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import msvcrt
+
+        fileno = stream.fileno()
+        handle = msvcrt.get_osfhandle(fileno)
+        if handle == -1:
+            return None
+
+        available = ctypes.c_ulong(0)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ok = kernel32.PeekNamedPipe(
+            ctypes.c_void_p(handle),
+            None,
+            0,
+            None,
+            ctypes.byref(available),
+            None,
+        )
+        if not ok:
+            return None
+        return int(available.value)
+    except Exception:
+        return None
 
 
 def _record_decode_telemetry(tag: str) -> None:
@@ -369,9 +469,8 @@ def kill_process_tree(
         except OSError as exc:
             # Process already exited between children enumeration and kill.
             logger.debug(
-                "[base_engine] psutil proc.kill() skipped pid=%s (%s)",
-                pid,
-                type(exc).__name__,
+                f"[base_engine] psutil proc.kill() skipped pid={pid} "
+                f"({type(exc).__name__})"
             )
         logger.debug(
             f"[base_engine] psutil 终止进程树 pid={pid} children={len(children)}"
@@ -518,36 +617,141 @@ _PUMP_DONE: Tuple[str, Any] = ("__pump_done__", None)
 def _pump(
     stream, tag: str, q: "queue.Queue[Tuple[str, Any]]"
 ) -> None:
-    """Read ``stream`` line-by-line and push ``(tag, bytes)`` onto ``q``.
+    """Read ``stream`` and push ``(tag, bytes)`` chunks onto ``q``.
 
     The pump reads raw bytes so encoding decisions stay in the main loop
     where they are tagged for telemetry by :func:`_decode_line` (task 20.1).
-    Each enqueued line preserves its trailing ``\\r\\n`` /  ``\\n`` so the
-    consumer can honor the newline-boundary guarantee in Requirement 20.3.
-    Terminates when the stream reaches EOF, closes, or raises (e.g. handle
-    was force-closed during process kill). Always enqueues the
-    ``_PUMP_DONE`` sentinel on exit.
+    Chunks are emitted on either ``\\n`` or ``\\r`` boundaries so engines that
+    refresh progress in-place (notably N_m3u8DL-RE) do not sit invisible until
+    EOF. Each enqueued chunk preserves the trailing delimiter for the consumer.
+
+    Earlier builds used ``stream.read(1)``. That is logically correct, but it
+    amplifies buffering/handle edge cases on Windows when console tools refresh
+    a single carriage-return progress row thousands of times. The hybrid loop
+    below reads whatever the pipe makes available in bounded chunks, then cuts
+    the in-memory buffer at CR/LF boundaries. This keeps CR progress real-time
+    without forcing one syscall per byte.
     """
+
+    def _put(raw: bytes) -> None:
+        if not raw:
+            return
+        try:
+            q.put((tag, raw), timeout=_get_pump_put_timeout())
+        except queue.Full:
+            # Consumer is stuck — dropping is safer than deadlocking the
+            # child process (PIPE back-pressure would eventually hang it).
+            logger.warning(
+                f"[base_engine] read_loop 队列已满,丢弃一行 {tag}"
+            )
+
+    def _flush_ready(buffer: bytearray) -> bool:
+        emitted = False
+        while buffer:
+            lf_index = buffer.find(b"\n")
+            cr_index = buffer.find(b"\r")
+            candidates = [index for index in (lf_index, cr_index) if index >= 0]
+            if not candidates:
+                return emitted
+
+            boundary = min(candidates)
+            end = boundary + 1
+            if buffer[boundary:boundary + 2] == b"\r\n":
+                end = boundary + 2
+            _put(bytes(buffer[:end]))
+            emitted = True
+            del buffer[:end]
+        return emitted
+
+    def _looks_like_realtime_partial(buffer: bytearray) -> bool:
+        """Return True for delimiter-less chunks worth emitting immediately.
+
+        This intentionally stays marker-based instead of flushing every tiny
+        partial write: normal log lines without CR/LF can still wait for EOF,
+        while progress/status rows that drive UI updates get delivered as soon
+        as the Windows pipe is drained.
+        """
+        if len(buffer) < _PUMP_PARTIAL_FLUSH_MIN_BYTES:
+            return False
+        sample = bytes(buffer[-4096:])
+        lower = sample.lower()
+        return (
+            b"%" in sample
+            or b"bps" in lower
+            or b"segments" in lower
+            or b"start downloading" in lower
+            or b"selected streams" in lower
+        )
+
+    def _flush_partial_if_pipe_idle(buffer: bytearray, current_stream: Any) -> bool:
+        if not buffer or not _looks_like_realtime_partial(buffer):
+            return False
+        available_now = _peek_named_pipe_available(current_stream)
+        if available_now != 0:
+            return False
+        _put(bytes(buffer))
+        buffer.clear()
+        return True
+
+    def _coerce_chunk(chunk: Any) -> bytes:
+        if isinstance(chunk, bytes):
+            return chunk
+        if isinstance(chunk, bytearray):
+            return bytes(chunk)
+        if isinstance(chunk, memoryview):
+            return chunk.tobytes()
+        if isinstance(chunk, str):
+            return chunk.encode("utf-8", errors="replace")
+        return bytes(chunk)
 
     try:
         if stream is None:
             return
-        # ``iter(readline, b"")`` yields one line at a time and stops at EOF.
-        # Engines are spawned with ``stdout=PIPE, stderr=PIPE`` and no
-        # ``text=True``, so ``readline()`` returns ``bytes``.
-        for raw in iter(stream.readline, b""):
-            if not raw:
-                break
-            try:
-                q.put((tag, raw), timeout=_PUT_TIMEOUT)
-            except queue.Full:
-                # Consumer is stuck — dropping is safer than deadlocking the
-                # child process (PIPE back-pressure would eventually hang it).
-                logger.warning(
-                    f"[base_engine] read_loop 队列已满,丢弃一行 {tag}"
-                )
+
+        buffer = bytearray()
+        read_chunk = getattr(stream, "read", None)
+        read1_chunk = getattr(stream, "read1", None)
+        fallback_read_chunk = read1_chunk if callable(read1_chunk) else read_chunk
+
+        if callable(read_chunk) or callable(fallback_read_chunk):
+            while True:
+                available = _peek_named_pipe_available(stream)
+                if available is not None:
+                    read_size = min(max(int(available), 1), _PUMP_READ_SIZE)
+                    reader = read_chunk if callable(read_chunk) else fallback_read_chunk
+                else:
+                    read_size = _PUMP_READ_SIZE
+                    reader = fallback_read_chunk
+                if not callable(reader):
+                    break
+
+                chunk = reader(read_size)
+                if not chunk:
+                    break
+                buffer.extend(_coerce_chunk(chunk))
+                _flush_ready(buffer)
+                if available is not None:
+                    _flush_partial_if_pipe_idle(buffer, stream)
+                if len(buffer) >= _PUMP_MAX_BUFFER_BYTES:
+                    _put(bytes(buffer))
+                    buffer.clear()
+        else:
+            # Some tests provide tiny file-like objects that only expose
+            # ``readline``. Keep that compatibility path while the production
+            # subprocess pipes use the chunk reader above.
+            for raw in iter(stream.readline, b""):
+                if not raw:
+                    break
+                buffer.extend(_coerce_chunk(raw))
+                _flush_ready(buffer)
+                if len(buffer) >= _PUMP_MAX_BUFFER_BYTES:
+                    _put(bytes(buffer))
+                    buffer.clear()
+
+        if buffer:
+            _put(bytes(buffer))
     except ValueError:
-        # readline() on a closed pipe raises ValueError on some platforms
+        # read()/readline() on a closed pipe raises ValueError on some platforms
         # (e.g. after kill_process_tree). Treat as EOF.
         pass
     except Exception as e:  # pragma: no cover - defensive
@@ -797,6 +1001,7 @@ class BaseEngine(ABC):
             env=env,
             close_fds=(os.name != "nt"),
             creationflags=creationflags,
+            bufsize=0,
         )
 
     # ------------------------------------------------------------------
@@ -863,11 +1068,16 @@ class BaseEngine(ABC):
         terminate_deadline: Optional[float] = None
         kill_deadline: Optional[float] = None
 
-        def _emit(tag: str, raw: bytes) -> None:
+        def _emit(tag: str, raw: bytes | str) -> None:
             try:
                 text = _decode_line(raw)
             except Exception:  # pragma: no cover - _decode_line falls back
-                text = raw.decode("latin-1", errors="replace")
+                # ISS-17: ``raw`` may be ``str`` when invoked from test
+                # mocks that simulate stdout via string iterators.
+                if isinstance(raw, str):
+                    text = raw
+                else:
+                    text = raw.decode("latin-1", errors="replace")
 
             # Strip the terminating newline but keep carriage returns for
             # progress-bar style lines (yt-dlp emits ``\r`` between updates).
@@ -901,8 +1111,8 @@ class BaseEngine(ABC):
                         )
                     terminated = True
                     now = time.monotonic()
-                    terminate_deadline = now + _TERMINATE_GRACE
-                    kill_deadline = now + _KILL_DEADLINE
+                    terminate_deadline = now + _get_stop_terminate_grace()
+                    kill_deadline = now + _get_stop_kill_deadline()
 
                 # 2) Pull at most one item per tick (0.1s timeout).
                 try:
@@ -927,7 +1137,10 @@ class BaseEngine(ABC):
                         f"kill_process_tree pid={proc.pid}"
                     )
                     try:
-                        kill_process_tree(proc.pid)
+                        kill_process_tree(
+                            proc.pid,
+                            expected_name=getattr(task, "_expected_engine_name", None),
+                        )
                     except Exception as e:  # pragma: no cover
                         logger.debug(
                             f"[base_engine] kill_process_tree 失败: {e}"
@@ -938,8 +1151,8 @@ class BaseEngine(ABC):
                 if proc.poll() is not None:
                     # Give the pumps a brief chance to flush any in-flight
                     # lines now that the pipes are closing.
-                    t_out.join(timeout=_PUMP_JOIN_TIMEOUT)
-                    t_err.join(timeout=_PUMP_JOIN_TIMEOUT)
+                    t_out.join(timeout=_get_pump_join_timeout())
+                    t_err.join(timeout=_get_pump_join_timeout())
                     while True:
                         try:
                             drained = q.get_nowait()

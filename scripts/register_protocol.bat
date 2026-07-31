@@ -1,9 +1,8 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-chcp 65001 >nul
 
 echo ============================================
-echo   M3U8D åè®®æ³¨å†Œå·¥å…·
+echo   M3U8D Ğ­Òé×¢²á¹¤¾ß
 echo ============================================
 echo.
 
@@ -16,12 +15,12 @@ set "PYTHON_EXE="
 set "COMMAND_VALUE="
 set "DEFAULT_ICON_VALUE="
 
-rem ä¼˜å…ˆä½¿ç”¨æ‰“åŒ…åçš„åè®®å¤„ç†å™¨ã€‚
+rem ÓÅÏÈÊ¹ÓÃ´ò°üºóµÄĞ­Òé´¦ÀíÆ÷¡£
 call :resolve_handler_exe "%INSTALL_DIR%\protocol_handler\protocol_handler.exe"
 if not defined HANDLER_EXE call :resolve_handler_exe "%INSTALL_DIR%\protocol_handler.exe"
 if not defined HANDLER_EXE call :resolve_handler_exe "%SCRIPT_DIR%protocol_handler.exe"
 
-rem å¼€å‘æºç ç¯å¢ƒå›é€€åˆ° protocol_handler.pywã€‚
+rem ¿ª·¢Ô´Âë»·¾³»ØÍËµ½ protocol_handler.pyw¡£
 if not defined HANDLER_EXE call :resolve_handler_script "%INSTALL_DIR%\protocol_handler.pyw"
 
 if defined HANDLER_EXE (
@@ -32,8 +31,8 @@ if defined HANDLER_EXE (
 if not defined COMMAND_VALUE if defined HANDLER_SCRIPT (
     call :resolve_python_executable
     if not defined PYTHON_EXE (
-        echo [ERROR] æ‰¾åˆ°äº†æºç åè®®å¤„ç†å™¨ï¼Œä½†æœªæ‰¾åˆ°å¯ç”¨çš„ Python è§£é‡Šå™¨ã€‚
-        echo [ERROR] è¯·å…ˆå®‰è£… Pythonï¼Œæˆ–è®¾ç½® M3U8D_PYTHON åé‡è¯•ã€‚
+        echo [ERROR] ÕÒµ½ÁËÔ´ÂëĞ­Òé´¦ÀíÆ÷£¬µ«Î´ÕÒµ½¿ÉÓÃµÄ Python ½âÊÍÆ÷¡£
+        echo [ERROR] ÇëÏÈ°²×° Python£¬»òÉèÖÃ M3U8D_PYTHON ºóÖØÊÔ¡£
         endlocal & exit /b 1
     )
     set "COMMAND_VALUE=\"!PYTHON_EXE!\" \"!HANDLER_SCRIPT!\" \"%%1\""
@@ -41,10 +40,10 @@ if not defined COMMAND_VALUE if defined HANDLER_SCRIPT (
 )
 
 if not defined COMMAND_VALUE (
-    echo [ERROR] æœªæ‰¾åˆ°å¯ç”¨äºæ³¨å†Œåè®®çš„å¤„ç†å™¨å…¥å£ã€‚
-    echo [ERROR] ä¼˜å…ˆè·¯å¾„:
+    echo [ERROR] Î´ÕÒµ½¿ÉÓÃÓÚ×¢²áĞ­ÒéµÄ´¦ÀíÆ÷Èë¿Ú¡£
+    echo [ERROR] ÓÅÏÈÂ·¾¶:
     echo         "%INSTALL_DIR%\protocol_handler\protocol_handler.exe"
-    echo [ERROR] å…¼å®¹å›é€€è·¯å¾„:
+    echo [ERROR] ¼æÈİ»ØÍËÂ·¾¶:
     echo         "%INSTALL_DIR%\protocol_handler.exe"
     echo         "%SCRIPT_DIR%protocol_handler.exe"
     echo         "%INSTALL_DIR%\protocol_handler.pyw"
@@ -56,7 +55,7 @@ if defined HANDLER_EXE echo [INFO] Handler EXE: "!HANDLER_EXE!"
 if defined HANDLER_SCRIPT echo [INFO] Handler Script: "!HANDLER_SCRIPT!"
 if defined PYTHON_EXE echo [INFO] Python: "!PYTHON_EXE!"
 echo [INFO] Command: !COMMAND_VALUE!
-echo [INFO] æ­£åœ¨æ³¨å†Œ m3u8dl:// åè®®...
+echo [INFO] ÕıÔÚ×¢²á m3u8dl:// Ğ­Òé...
 echo.
 
 reg add "HKCU\Software\Classes\m3u8dl" /ve /d "URL:M3U8DL Protocol" /f >nul
@@ -79,13 +78,13 @@ if errorlevel 1 goto :register_failed
 reg add "HKCU\Software\Classes\m3u8dl\shell\open\command" /ve /d "!COMMAND_VALUE!" /f >nul
 if errorlevel 1 goto :register_failed
 
-echo [SUCCESS] m3u8dl:// åè®®å·²æ³¨å†Œã€‚
-if defined HANDLER_EXE echo [SUCCESS] ç›®æ ‡ç¨‹åº: "!HANDLER_EXE!"
-if defined HANDLER_SCRIPT echo [SUCCESS] ç›®æ ‡è„šæœ¬: "!HANDLER_SCRIPT!"
+echo [SUCCESS] m3u8dl:// Ğ­ÒéÒÑ×¢²á¡£
+if defined HANDLER_EXE echo [SUCCESS] Ä¿±ê³ÌĞò: "!HANDLER_EXE!"
+if defined HANDLER_SCRIPT echo [SUCCESS] Ä¿±ê½Å±¾: "!HANDLER_SCRIPT!"
 endlocal & exit /b 0
 
 :register_failed
-echo [ERROR] m3u8dl:// åè®®æ³¨å†Œå¤±è´¥ã€‚
+echo [ERROR] m3u8dl:// Ğ­Òé×¢²áÊ§°Ü¡£
 endlocal & exit /b 1
 
 :resolve_handler_exe

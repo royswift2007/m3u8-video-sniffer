@@ -67,6 +67,14 @@ class DependencyUpdateSpec:
     install_strategy: str = "replace_file"
     requires_process_free: bool = True
     post_install_version_required: bool | None = None
+    # When ``False`` (default), a remote release whose version carries a
+    # prerelease suffix (``-beta`` / ``-rc.1`` / ``-alpha``) is treated as
+    # NOT eligible for automatic upgrade, even if its numeric core is newer
+    # than the local version. This guards against upstream shipping a beta
+    # as the "latest" release (e.g. nilaoda/N_m3u8DL-RE v0.6.0-beta) and
+    # silently breaking the engine. Set ``True`` to opt into prerelease
+    # upgrades for a component.
+    allow_prerelease: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,6 +213,7 @@ class DependencyManifest:
             install_strategy=str(raw_update.get("install_strategy") or "replace_file").strip().lower(),
             requires_process_free=bool(raw_update.get("requires_process_free", True)),
             post_install_version_required=self._optional_bool(raw_update.get("post_install_version_required"), default=None),
+            allow_prerelease=bool(raw_update.get("allow_prerelease", False)),
         )
 
     @staticmethod

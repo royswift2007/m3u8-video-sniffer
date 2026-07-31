@@ -24,6 +24,18 @@
 - 使用者需要自行查阅并遵守相关依赖与工具的官方许可证、发布说明及使用限制。
 - 如仓库中包含第三方二进制文件、安装脚本或依赖下载逻辑，其存在仅为便于构建、测试或运行，不应被理解为作者对第三方内容拥有权利，亦不代表对第三方服务作出任何保证。
 
+### 3.1 核心引擎许可
+
+| 引擎 | 许可证 | 项目地址 |
+| --- | --- | --- |
+| **yt-dlp** | Unlicense | <https://github.com/yt-dlp/yt-dlp> |
+| **N_m3u8DL-RE** | MIT | <https://github.com/nilaoda/N_m3u8DL-RE> |
+| **FFmpeg** | LGPL-2.1+ / GPL-2.0+ | <https://ffmpeg.org> |
+| **aria2** | GPL-2.0 | <https://github.com/aria2/aria2> |
+| **Streamlink** | BSD-2-Clause | <https://github.com/streamlink/streamlink> |
+
+使用者分发包含上述引擎的二进制包时，须同时提供完整的许可证文本及源代码获取方式（若许可证要求）。
+
 ## 4. 禁止违法用途声明
 
 严禁将本项目用于任何违法违规、侵权或规避限制的行为，包括但不限于：

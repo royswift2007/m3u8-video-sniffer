@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse, urlsplit
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from utils.config_manager import config
 from utils.headers import sanitize_headers
 from utils.logger import logger
 from utils.i18n import TR
@@ -615,10 +616,26 @@ class DownloadRequestHandler(BaseHTTPRequestHandler):
         # headers received so the raw values never hit the log even in
         # verbose mode.
         raw_count = len(headers) if isinstance(headers, dict) else 0
-        clean_headers = sanitize_headers(headers if isinstance(headers, dict) else None)
+        features = config.get("features", {}) or {}
+        clean_headers = sanitize_headers(
+            headers if isinstance(headers, dict) else None,
+            include_cookie=bool(features.get("forward_cookie_headers", True)),
+            include_authorization=bool(features.get("forward_authorization_headers", False)),
+        )
+        cookie_len = len(clean_headers.get("Cookie", "") or "")
+        logger.info(
+            "[HTTP] CatCatch header 摘要: "
+            f"received={raw_count} forwarded={len(clean_headers)} has_cookie={cookie_len > 0} cookie_len={cookie_len}",
+            event="catcatch_headers_summary",
+            stage="http_handle_download",
+            header_count=raw_count,
+            forwarded_count=len(clean_headers),
+            has_cookie=cookie_len > 0,
+            cookie_len=cookie_len,
+        )
         logger.debug(
             f"[HTTP] Headers: received={raw_count} forwarded={len(clean_headers)} "
-            f"names={sorted(clean_headers.keys())}"
+            f"names={sorted(clean_headers.keys())} has_cookie={cookie_len > 0} cookie_len={cookie_len}"
         )
         logger.debug(f"[HTTP] Filename: {filename}")
 
@@ -642,8 +659,8 @@ class DownloadRequestHandler(BaseHTTPRequestHandler):
                 forwarded[canonical] = value
                 forwarded[canonical.lower()] = value
 
-            # Audit-finding High #2: DO NOT re-inject ``_``-prefixed keys
-            # from the external ``headers`` payload. Those markers are
+            # Audit-finding High #2 / F-03: DO NOT re-inject ``_``-prefixed
+            # keys from the external ``headers`` payload. Those markers are
             # meant to be trusted-local pointers (e.g. ``_cookie_file``
             # routing ``ytdlp_engine`` at a disk path) and must only be
             # set by the UI/engine layers after their own trust checks.
@@ -654,6 +671,15 @@ class DownloadRequestHandler(BaseHTTPRequestHandler):
             # means the engine falls back to its normal cookie-discovery
             # flow (see ``YtdlpEngine._resolve_cookie_file``), which is
             # the correct behaviour for extension-delivered URLs.
+            #
+            # sanitize_headers already drops ``_``-prefixed keys because
+            # they fail the R6.1 ``[A-Za-z0-9-]`` name regex, but this
+            # explicit pop is a belt-and-braces guarantee that even a
+            # future allowlist relaxation can never let ``_cookie_file``
+            # through to the engine.
+            for k in list(forwarded.keys()):
+                if isinstance(k, str) and k.startswith("_"):
+                    forwarded.pop(k, None)
 
             DownloadRequestHandler.on_download_request(url, forwarded, filename)
             self._send_response(
@@ -701,8 +727,8 @@ class CatCatchServer(QObject):
     ):
         super().__init__()
         self.port = port
-        self.server = None
-        self.thread = None
+        self.server: ThreadingHTTPServer | None = None
+        self.thread: threading.Thread | None = None
         self._running = False
         self._lock = threading.Lock()
         self._start_event = threading.Event()

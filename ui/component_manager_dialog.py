@@ -230,7 +230,9 @@ class ComponentManagerDialog(QDialog):
         self.refresh_btn.clicked.connect(self.refresh_local_status)
         self.check_updates_btn.clicked.connect(self.check_updates)
         self.update_all_btn.clicked.connect(self.confirm_and_update_all)
-        self.close_btn.clicked.connect(self.accept)
+        # ISS-44: close_btn 走 _close_and_cleanup 而非直接 accept，确保 worker.shutdown() 执行
+        self.close_btn.clicked.connect(self._close_and_cleanup)
+        self.finished.connect(self._on_finished_cleanup)
         self.table.itemSelectionChanged.connect(self._sync_detail_from_selection)
         self.worker.operation_started.connect(self._on_operation_started)
         self.worker.operation_finished.connect(self._on_operation_finished)
@@ -242,6 +244,21 @@ class ComponentManagerDialog(QDialog):
         self.worker.operation_failed.connect(self._on_operation_failed)
         self.worker.log_message.connect(self._on_worker_log_message)
         i18n.language_changed.connect(self.retranslate_ui)
+
+    def _close_and_cleanup(self) -> None:
+        """ISS-44: close_btn 触发清理后 accept，确保 worker.shutdown() 执行。"""
+        try:
+            self.worker.shutdown()
+        except RuntimeError:
+            pass
+        self.accept()
+
+    def _on_finished_cleanup(self, _result_code: int) -> None:
+        """ISS-44: 任何 finished 路径（含 X 按钮、ESC）都确保 worker.shutdown()。"""
+        try:
+            self.worker.shutdown()
+        except RuntimeError:
+            pass
 
     def refresh_local_status(self) -> None:
         """Start local-only refresh."""
@@ -404,10 +421,18 @@ class ComponentManagerDialog(QDialog):
         self.log_text.append(message)
 
     def collect_bulk_update_rows(self) -> list[ComponentTableRow]:
-        """Collect rows eligible for bulk update/install/retry from the current table state."""
+        """Collect rows eligible for bulk update/install/retry from the current table state.
+
+        Prerelease rows (``remote_is_prerelease``) are intentionally EXCLUDED
+        from bulk update so that "update all" never silently pulls a beta.
+        Users must opt into a prerelease via the per-row update button, which
+        shows a dedicated prerelease warning confirmation.
+        """
         eligible: list[ComponentTableRow] = []
         for row in self._rows:
             if row.status in RUNNING_STATUSES:
+                continue
+            if row.status == "remote_is_prerelease":
                 continue
             if row.update_available or row.status in {"update_available", "missing"} or row.status in FAILURE_STATUSES:
                 eligible.append(row)
@@ -460,17 +485,37 @@ class ComponentManagerDialog(QDialog):
         action_key = action_key_for_row(row)
         if action_key is None:
             return False
-        reply = QMessageBox.question(
-            self,
-            TR("component_confirm_title"),
-            TR("component_confirm_update_message", action=TR(action_key), component=row.label),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
+        # Prerelease opt-in: when the remote is a prerelease the backend
+        # suppresses the automatic upgrade. The user explicitly clicked the
+        # update button, so show a dedicated warning and — on confirmation —
+        # pass ``force=True`` so the backend prerelease guard lets it through.
+        is_prerelease_row = row.status == "remote_is_prerelease"
+        if is_prerelease_row:
+            reply = QMessageBox.question(
+                self,
+                TR("component_confirm_title"),
+                TR(
+                    "component_confirm_prerelease_message",
+                    component=row.label,
+                    version=row.remote_version or "",
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        else:
+            reply = QMessageBox.question(
+                self,
+                TR("component_confirm_title"),
+                TR("component_confirm_update_message", action=TR(action_key), component=row.label),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
         if reply != QMessageBox.StandardButton.Yes:
             self._append_log(TR("component_log_update_cancelled", component=row.label))
             return False
-        return self.start_component_update(component_id, force=force)
+        # force=True for prerelease rows so the backend guard permits the
+        # manual opt-in; otherwise honor the caller's force flag.
+        return self.start_component_update(component_id, force=force or is_prerelease_row)
 
     def start_component_update(self, component_id: str, force: bool = False) -> bool:
         """Start worker update after confirmation; exposed for fake smoke tests."""
@@ -697,6 +742,12 @@ def action_key_for_row(row: ComponentTableRow) -> str | None:
         return "component_action_install"
     if row.update_available or row.status == "update_available":
         return "component_action_update"
+    # A remote prerelease is not auto-upgraded, but the user may manually opt
+    # in by clicking the update button (which routes through a prerelease
+    # confirmation dialog). Surface it as an actionable update so the button
+    # is enabled rather than greyed out.
+    if row.status == "remote_is_prerelease":
+        return "component_action_update"
     if row.status in FAILURE_STATUSES:
         return "component_action_retry"
     return None
@@ -716,7 +767,7 @@ def component_status_to_row(status: ComponentUpdateStatus | Any) -> ComponentTab
     update_available = bool(getattr(status, "update_available", False))
     status_class, status_key = status_to_ui_state(raw_status, update_available=update_available)
     message = str(getattr(status, "message", "") or getattr(local, "error", "") or getattr(remote, "error", "") or "")
-    progress = "100%" if raw_status in {"latest", "update_available", "local_checked", "updated"} else "-"
+    progress = "100%" if raw_status in {"latest", "update_available", "local_checked", "updated", "remote_is_prerelease"} else "-"
     return ComponentTableRow(
         component_id=component_id,
         label=label,
@@ -750,7 +801,7 @@ def summarize_component_entry_rows(rows: list[ComponentTableRow]) -> dict[str, i
     for row in rows or []:
         total += 1
         raw_status = (row.status or "").strip().lower()
-        if row.update_available or raw_status == "update_available":
+        if row.update_available or raw_status == "update_available" or raw_status == "remote_is_prerelease":
             updates += 1
         if raw_status == "missing":
             missing += 1

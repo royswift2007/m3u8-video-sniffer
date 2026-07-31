@@ -1,8 +1,10 @@
-# M3U8D v0.4.1
+# M3U8D v0.5.0
 
 <p align="leftr">
   <a href="README.md">English</a> | <b>简体中文</b>
 </p>
+
+> ⚠️ **免责声明**：本工具仅供个人学习、技术研究与合法合规使用。下载内容须遵守目标站点服务条款（ToS）与当地版权法。详细免责条款与第三方引擎许可证见 [`OPEN_SOURCE_NOTICE.md`](OPEN_SOURCE_NOTICE.md)。
 
 > 面向 Windows 桌面环境的流媒体资源嗅探、解析与下载工具。通过真实浏览器会话捕获媒体资源，分派到多个下载引擎，管理从发现到完成的完整生命周期。
 
@@ -55,7 +57,7 @@ M3U8D 是一个基于 Python + PyQt6 的 Windows 桌面应用，将以下任务�
 | Aria2 | 直链文件与磁力链接 |
 | FFmpeg | 后处理（转封装、合并、字幕提取） |
 
-引擎选择优先级：用户指定 → 扩展名判定 → MIME 探测 → 直播平台名单 → yt-dlp 兜底。规则外置在 `resources/engine_rules.json`，可直接编辑。
+引擎选择优先级：用户指定 → 上下文感知检测（resource_type/mime）→ HEAD MIME 探测 → 扩展名回退 → 直播平台名单 → yt-dlp 兜底。上下文从资源检测端到端流经 [`core/download_context.py`](core/download_context.py)。规则外置在 `resources/engine_rules.json`，可直接编辑。
 
 ### 下载管理
 
@@ -178,7 +180,7 @@ scripts\register_protocol.bat
 |------|------|------|
 | 构建 | PyInstaller | `build_pyinstaller.py` / `build_pyinstaller.bat` |
 | 安装器 | Inno Setup | `installer/M3U8D.iss` |
-| 输出 | | `installer/output/M3U8D-Setup v0.4.1.exe` |
+| 输出 | | `installer/output/M3U8D-Setup v0.5.0.exe` |
 
 安装器支持：
 - 安装主程序与协议处理器
@@ -195,6 +197,7 @@ M3U8D/
 ├── config.json                # 配置文件
 ├── deps.json                  # 外部依赖清单
 ├── core/                      # 嗅探、下载管理、组件更新
+│   ├── download_context.py    # 统一下载上下文（EngineSelectContext）
 │   └── download/              # 模块化下载管理器（队列、worker、分类器）
 ├── engines/                   # 下载引擎适配层
 ├── ui/                        # PyQt6 图形界面
@@ -242,7 +245,7 @@ Playwright 驱动的 Chrome 与日常浏览器的启动参数不同，常见原�
 ## 相关文档
 
 - [INSTALL.md](INSTALL.md) — 安装与环境准备
-- [CHANGELOG_v0.4.1.md](CHANGELOG_v0.4.1.md) — 从 v0.3.1 起的详细更新日志
+- [CHANGELOG_v0.5.0.md](CHANGELOG_v0.5.0.md) — 从 v0.3.1 起的详细更新日志
 - [resources/manual_zh.md](resources/manual_zh.md) — 详细中文使用手册
 - [resources/manual_en.md](resources/manual_en.md) — 详细英文使用手册
 

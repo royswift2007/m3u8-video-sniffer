@@ -44,7 +44,7 @@ class LogPanel(QWidget):
         header_layout.addWidget(self.intro_label)
  
         panel_layout.addLayout(header_layout)
-# 日志文本框
+        # 日志文本框
         self.log_text = QTextEdit()
         self.log_text.setObjectName("download_center_log_text")
         self.log_text.setReadOnly(True)
@@ -154,10 +154,31 @@ class LogPanel(QWidget):
                     # 忽略日志处理器中的异常，避免递归
                     pass
         
-        # 添加处理器到全局 logger
+        # ISS-39: 保存 handler 引用，避免重复累积；销毁时移除
         handler = QtLogHandler(self)
         handler.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
+        self._qt_log_handler = handler
         logging.getLogger().addHandler(handler)
+
+    def _teardown_logger_handler(self):
+        """ISS-39: 从全局 logger 移除本 panel 的 handler，防止累积与悬空引用。"""
+        handler = getattr(self, "_qt_log_handler", None)
+        if handler is None:
+            return
+        try:
+            logging.getLogger().removeHandler(handler)
+        except RuntimeError:
+            pass
+        try:
+            handler.close()
+        except RuntimeError:
+            pass
+        self._qt_log_handler = None
+
+    def closeEvent(self, event):
+        """ISS-39: 面板关闭时清理 logger handler。"""
+        self._teardown_logger_handler()
+        super().closeEvent(event)
     
     
     @pyqtSlot(str, str)
@@ -168,7 +189,7 @@ class LogPanel(QWidget):
             color_map = {
                 'DEBUG': '#888888',
                 'INFO': '#000000',
-                'WARNING': '#FF8C00',
+                'WARNING': '#D97706',
                 'ERROR': '#FF0000',
                 'CRITICAL': '#8B0000'
             }

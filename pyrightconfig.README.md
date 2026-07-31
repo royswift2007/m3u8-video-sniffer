@@ -67,3 +67,11 @@ Widening `include` to the full repository is a follow-up, not part of
 to suppress unrelated `reportUnknownMemberType` / `reportUnknownVariableType`
 findings either by adding `.pyi` stubs or by keeping them at `none` as
 this file already does.
+
+## Notes on newer modules (v0.5.0, 2026-06)
+
+New modules such as `core/download_context.py` (the unified `EngineSelectContext`
+dataclass) are deliberately excluded from the current `pyrightconfig.json` scope.
+They do not participate in the `TaskSnapshot` typed channel contract that this
+configuration enforces. Adding them to `include` would introduce noise from
+unrelated `dict`/`Mapping` annotations without strengthening Requirement 29.

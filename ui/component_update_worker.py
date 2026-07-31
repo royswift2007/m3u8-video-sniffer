@@ -220,6 +220,11 @@ def status_to_ui_state(status: str, update_available: bool = False) -> tuple[str
     normalized = (status or "unknown").strip().lower()
     if update_available or normalized == "update_available":
         return "update", "component_status_update_available"
+    # A remote prerelease is surfaced as an actionable update so the row's
+    # update button is enabled (the user may manually opt in). It uses the
+    # same "update" UI class as a normal available update.
+    if normalized == "remote_is_prerelease":
+        return "update", "component_status_remote_is_prerelease"
     if normalized in {"latest", "local_checked", "installed", "updated", "manifest_listed", "local_check_failed"}:
         return "ok", "component_status_latest" if normalized in {"latest", "updated"} else "component_status_installed"
     if normalized in {"started", "checking", "downloading", "staged", "installing", "running"}:

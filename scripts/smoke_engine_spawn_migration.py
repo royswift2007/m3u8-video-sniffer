@@ -199,11 +199,13 @@ def _runtime_probe() -> list[str]:
                 url="https://example.invalid/playlist.m3u8",
                 title=f"{class_name}-probe",
                 headers={},
+                page_url="https://example.invalid/page",
             )
             task = DownloadTask(
-                resource=resource,
-                download_dir=str(PROJECT_ROOT / "build" / "_spawn_probe"),
+                url=resource.url,
+                save_dir=str(PROJECT_ROOT / "build" / "_spawn_probe"),
                 filename=f"{class_name}-probe.mp4",
+                headers=resource.headers,
             )
 
             method = getattr(engine, method_name, None)

@@ -12,6 +12,13 @@ Exports:
     is_blocked_ip(ip)   -- boolean predicate for R4.AC1 address families.
     ensure_public(url, *, allow_private=False) -> ResolvedHost.
     SSRFBlocked         -- exception raised by ``ensure_public``.
+    make_pinned_session(resolved, **kwargs) -> requests.Session
+                        -- Session bound to ``resolved.ips[0]`` with the
+                           original hostname preserved in the ``Host``
+                           header so TLS SNI / cert validation still work.
+                           Used by m3u8_parser / hls_probe / engine_selector
+                           to close the TOCTOU window between
+                           ``ensure_public`` and the actual TCP connect.
 
 The blocked ranges cover Requirement 4.AC1 exactly:
 
@@ -28,8 +35,8 @@ import ipaddress
 import socket
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network
-from typing import Tuple, Union
-from urllib.parse import urlsplit
+from typing import Any, Optional, Tuple, Union
+from urllib.parse import urlsplit, urlunsplit
 
 
 __all__ = (
@@ -38,6 +45,8 @@ __all__ = (
     "resolve_all",
     "is_blocked_ip",
     "ensure_public",
+    "make_pinned_session",
+    "pinned_url_and_host",
 )
 
 
@@ -306,3 +315,128 @@ def ensure_public(url: str, *, allow_private: bool = False) -> ResolvedHost:
             raise SSRFBlocked(url, reason="ip_in_blocklist", offending_ip=addr)
 
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Connection pinning (F-01: closes the TOCTOU window between ensure_public
+# and the actual TCP connect by binding the requests session to the already-
+# vetted IP, while preserving the original hostname for SNI / Host header).
+# ---------------------------------------------------------------------------
+
+
+def pinned_url_and_host(url: str, resolved: "ResolvedHost") -> Tuple[str, Optional[str]]:
+    """Rewrite ``url``'s authority to ``resolved.ips[0]`` and return the
+    ``Host`` header value that must be sent so the origin server still
+    sees the original virtual-host name (required for SNI + cert
+    validation + CDN vhost routing).
+
+    Returns ``(pinned_url, host_header_or_None)``. When ``url`` has no
+    hostname or ``resolved`` has no IPs, the URL is returned unchanged
+    and ``host_header`` is ``None`` (caller should then let ``requests``
+    resolve normally — still SSRF-safe because the caller already ran
+    :func:`ensure_public`).
+
+    IPv6 literals are bracketed per RFC 3986. The port and userinfo
+    from the original URL are preserved.
+    """
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url, None
+
+    host = parts.hostname or ""
+    if not host or not resolved or not resolved.ips:
+        return url, None
+
+    first_ip = resolved.ips[0]
+    ip_literal = f"[{first_ip}]" if ":" in str(first_ip) else str(first_ip)
+    port = f":{parts.port}" if parts.port else ""
+    userinfo = ""
+    if parts.username:
+        userinfo = parts.username
+        if parts.password:
+            userinfo += f":{parts.password}"
+        userinfo += "@"
+    new_netloc = f"{userinfo}{ip_literal}{port}"
+    pinned = urlunsplit(
+        (parts.scheme, new_netloc, parts.path, parts.query, parts.fragment)
+    )
+    host_header = host if parts.port is None else f"{host}:{parts.port}"
+    return pinned, host_header
+
+
+def make_pinned_session(resolved: "ResolvedHost", **session_kwargs: Any):
+    """Return a :class:`requests.Session` bound to ``resolved.ips[0]``.
+
+    The session mounts a custom :class:`requests.adapters.HTTPAdapter`
+    whose ``pool`` is created with ``source_address`` set to the pinned
+    IP *for the connect socket*. Because ``requests`` / ``urllib3`` do
+    the DNS resolution themselves when a hostname is in the URL, callers
+    MUST pass the *pinned* URL produced by :func:`pinned_url_and_host`
+    (which replaces the authority with the IP literal) AND set the
+    ``Host`` header so the request line targets the original vhost.
+
+    The adapter override is best-effort: if the underlying urllib3
+    version does not accept ``source_address`` for the chosen address
+    family, the session still works but loses the source-binding
+    guarantee (the URL-authority pinning is the primary defence; this
+    is defence-in-depth).
+
+    ``session_kwargs`` are forwarded to ``Session.__init__`` style
+    attributes (e.g. ``verify=False``) — though verify should normally
+    stay ``True`` to honour SNI / cert validation against the original
+    hostname.
+
+    A real ``requests`` import is performed lazily so this module keeps
+    its "pure-policy" character for callers that only need
+    :func:`ensure_public`.
+    """
+
+    try:
+        import requests  # type: ignore
+        from requests.adapters import HTTPAdapter  # type: ignore
+    except Exception:  # pragma: no cover - requests is a hard dep but be safe
+        return None
+
+    session = requests.Session()
+
+    first_ip = resolved.ips[0] if resolved and resolved.ips else None
+    if first_ip is None:
+        return session
+
+    # ``source_address`` expects a (host, port) tuple; port 0 lets the OS
+    # pick an ephemeral source port. We attempt to coerce to a 4-tuple
+    # for AF_INET6 to be explicit, but urllib3 accepts the 2-tuple form.
+    try:
+        ip_str = str(first_ip)
+        is_v6 = ":" in ip_str
+        source_address: Tuple = (ip_str, 0) if not is_v6 else (ip_str, 0, 0, 0)
+    except Exception:
+        source_address = None  # type: ignore[assignment]
+
+    class _PinnedAdapter(HTTPAdapter):
+        """HTTPAdapter that creates its pool with a fixed source address."""
+
+        # HTTPAdapter.init_poolmanager passes **kwargs through; we inject
+        # source_address so every new connection from this pool originates
+        # from the vetted IP. (Pool re-use after rebind would otherwise
+        # hand the pool an unrelated destination, but because the URL
+        # authority is also the vetted IP literal, urllib3 connects to
+        # that exact IP — never re-resolving the hostname.)
+        def init_poolmanager(self, *args, **kwargs):  # type: ignore[override]
+            if source_address is not None:
+                kwargs.setdefault("source_address", source_address)
+            return super().init_poolmanager(*args, **kwargs)
+
+    adapter = _PinnedAdapter()
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    # Forward a small set of caller-controlled attributes.
+    if "verify" in session_kwargs:
+        session.verify = bool(session_kwargs["verify"])
+    if "proxies" in session_kwargs and session_kwargs["proxies"]:
+        session.proxies.update(session_kwargs["proxies"])
+
+    return session

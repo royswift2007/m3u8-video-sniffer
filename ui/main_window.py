@@ -27,12 +27,13 @@ from engines.ytdlp_engine import YtdlpEngine
 from ui.component_update_worker import ComponentUpdateWorker
 from ui.main_window_actions import MainWindowActionsMixin
 from ui.main_window_sniff_flow import MainWindowSniffFlowMixin
+from ui.main_window_postprocess import MainWindowPostprocessMixin
 from utils.config_manager import config
 from utils.i18n import i18n, TR
 from utils.logger import logger
 from utils.redact import redact_url
 
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.5.0"
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ def build_main_window_title() -> str:
     return f"M3U8D v{APP_VERSION}"
 
 
-class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
+class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, MainWindowPostprocessMixin, QMainWindow):
     """主应用窗口"""
 
     # ---------------------------------------------------------------
@@ -82,11 +83,9 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
     # ``_task_raw_thread_hop`` is the legacy Qt signal used purely as a
     # thread-hop primitive: workers in ``core/download_manager.py`` call
     # ``self._on_task_update`` (a non-Qt callback) which ``emit()``s the
-    # raw ``DownloadTask`` so the UI slot runs on the main thread. The
-    # raw task is still needed by ``ui/download_queue.py`` which reads
-    # a handful of volatile fields directly while rendering the tree;
-    # Stage 4 (R26) will migrate that consumer too and let us retire
-    # this channel.
+    # raw ``DownloadTask`` so the UI slot runs on the main thread. Queue
+    # rendering now uses immutable ``TaskSnapshot`` values; the raw task
+    # channel remains for control handles and terminal history records.
     #
     # ``_task_snapshot_thread_hop`` is the new R11.7 / R29 channel: the
     # manager builds an immutable :class:`TaskSnapshot` under
@@ -96,6 +95,7 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
     # the snapshot.
     _task_raw_thread_hop = pyqtSignal(object)
     _task_snapshot_thread_hop = pyqtSignal(object)
+    _postprocess_finished = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
@@ -107,9 +107,13 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
         self.setStyleSheet(MODERN_STYLE)
 
         # 设置应用图标
-        icon_path = str(Path(__file__).parent.parent / "resources" / "icon.png")
+        icon_path = str(Path(__file__).parent.parent / "resources" / "mvs.ico")
         if Path(icon_path).exists():
             self.setWindowIcon(QIcon(icon_path))
+
+        # 初始化系统托盘通知服务（在主线程创建 QSystemTrayIcon）
+        from utils.notification_service import NotificationService
+        NotificationService.instance().initialize(self)
 
         # 初始化语言环境
         i18n.set_language(config.get("language", "zh"))
@@ -121,15 +125,22 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
         self._init_ui()
         self.retranslate_ui()  # 触发首次渲染
         self._connect_signals()
-        # Legacy raw-task thread hop: ``ui/download_queue.py`` still
-        # reads the ``DownloadTask`` directly during rendering; keep
-        # this wired until Stage 4 R26 moves the queue panel onto
-        # ``TaskSnapshot`` (see class-level comment above).
-        self._task_raw_thread_hop.connect(self._handle_task_update_on_main_thread)
+        # Legacy raw-task thread hop: keeps raw ``DownloadTask`` control
+        # handles and terminal history writes on the main thread. Queue
+        # display itself is driven by ``TaskSnapshot`` below.
+        self._task_raw_thread_hop.connect(
+            self._handle_task_update_on_main_thread,
+            Qt.ConnectionType.QueuedConnection,
+        )
         # R11.7 / R29 snapshot channel: delivers an immutable
         # ``TaskSnapshot`` to the read-only ``task_update_received``
-        # slot below.
-        self._task_snapshot_thread_hop.connect(self.task_update_received)
+        # slot below. Use explicit queued connections for both task-update
+        # signals so queue rendering never runs re-entrantly inside
+        # DownloadManager.add_task or directly on a download worker thread.
+        self._task_snapshot_thread_hop.connect(
+            self.task_update_received,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._init_component_startup_check()
 
         logger.info(TR("log_ready"))
@@ -145,7 +156,9 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
             # N_m3u8DL-RE
             n_m3u8dl_path = config.get("engines.n_m3u8dl_re.path")
             if Path(n_m3u8dl_path).exists():
-                self.engines.append(N_m3u8DL_RE_Engine(n_m3u8dl_path))
+                n_m3u8dl_engine = N_m3u8DL_RE_Engine(n_m3u8dl_path)
+                self.engines.append(n_m3u8dl_engine)
+                self.n_m3u8dl_engine = n_m3u8dl_engine
                 logger.info(TR("log_engine_loaded").format(name="N_m3u8DL-RE"))
             else:
                 logger.warning(TR("log_engine_not_found").format(name="N_m3u8DL-RE", path=n_m3u8dl_path))
@@ -203,8 +216,8 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
         )
 
         # 设置回调
-        # Raw DownloadTask callback (legacy) — keeps
-        # ``ui/download_queue.py`` happy until Stage 4 R26.
+        # Raw DownloadTask callback (legacy) — keeps control handles and
+        # history persistence on the main thread; rendering uses snapshots.
         self.download_manager.on_task_update = self._on_task_update
         # R11.7 / R29 snapshot callback — read-only path into the UI.
         self.download_manager.on_task_snapshot = self._on_task_snapshot
@@ -232,6 +245,8 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
         self.download_queue.task_retried.connect(self.download_manager.resume_task)  # 重试 = 继续
         self.download_queue.task_removed.connect(self.download_manager.remove_task)  # 移除任务
         self.download_queue.task_batch_imported.connect(self._on_batch_import_requested)
+        self.download_queue.task_postprocess_requested.connect(self._on_postprocess_requested)
+        self._postprocess_finished.connect(self._on_postprocess_finished)
 
         # 历史记录操作
         self.history_panel.record_download_requested.connect(self._on_history_download_requested)
@@ -255,11 +270,10 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
     def _on_task_update(self, task: DownloadTask) -> None:
         """Legacy raw-task callback: forwarded via Qt signal to the UI thread.
 
-        ``ui/download_queue.py`` still reads volatile fields off the
-        raw :class:`DownloadTask` while it renders the queue tree;
-        keep the raw-task hop alive until Stage 4 R26 migrates that
-        consumer onto :class:`TaskSnapshot`. Snapshot delivery is
-        handled separately by :meth:`_on_task_snapshot` below.
+        The queue panel keeps the raw :class:`DownloadTask` as a control
+        handle, and this path still records terminal-state history on the
+        UI thread. Display state is delivered separately as immutable
+        snapshots by :meth:`_on_task_snapshot` below.
         """
         self._task_raw_thread_hop.emit(task)
 
@@ -292,34 +306,99 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
     def _handle_task_update_on_main_thread(self, task: DownloadTask) -> None:
         """Main-thread bridge for the legacy raw-task channel.
 
-        Responsible for (a) refreshing the download-queue panel which
-        still reads :class:`DownloadTask` directly, and (b) recording
-        history once the task reaches a terminal state. The snapshot
-        slot :meth:`task_update_received` is invoked separately by the
-        R29 channel; this method is scheduled to be retired together
-        with ``ui/download_queue.py``'s raw-task dependency as part of
-        Stage 4 R26.
+        Responsible for (a) refreshing the queue panel's raw
+        :class:`DownloadTask` control handle, and (b) recording history
+        once the task reaches a terminal state. Queue display fields are
+        refreshed by :meth:`task_update_received` from immutable
+        ``TaskSnapshot`` values.
         """
-        self.download_queue.add_or_update_task(task)
-
-        # 如果任务完成或失败，记录到历史
-        if task.status in ['completed', 'failed']:
-            if getattr(task, "_history_recorded_status", None) == task.status:
-                return
-            size = task.downloaded_size if task.downloaded_size else 'N/A'
-            self.history_panel.add_record(
-                filename=task.filename,
-                url=task.url,
-                status=task.status,
-                size=size,
-                headers=task.headers,
-                engine=task.engine,
-                save_dir=task.save_dir,
-                selected_variant=getattr(task, 'selected_variant', None),
-                master_url=getattr(task, 'master_url', None),
-                media_url=getattr(task, 'media_url', None)
+        filename = getattr(task, "filename", "")
+        status = getattr(task, "status", "")
+        # R41 — stale late snapshots for a removed task must not
+        # resurrect deleted QTreeWidgetItems; ``add_or_update_task``
+        # already rejects ``status == "removed"``, but also avoid
+        # the history recording code below touching a dead task.
+        # The kill-window race means ``status`` can still be
+        # ``"downloading"`` while ``stop_reason`` is already
+        # ``"removed"``.  Check both.
+        if status == "removed" or getattr(task, "stop_reason", "") == "removed":
+            return
+        logger.debug(
+            "主线程任务更新开始",
+            event="ui_task_update_start",
+            task_id=id(task),
+            filename=filename,
+            status=status,
+        )
+        try:
+            self.download_queue.add_or_update_task(task)
+            logger.debug(
+                "主线程下载队列控制句柄刷新完成",
+                event="ui_task_update_handle_done",
+                task_id=id(task),
+                filename=filename,
+                status=getattr(task, "status", status),
             )
-            setattr(task, "_history_recorded_status", task.status)
+
+            # 如果任务完成或失败，记录到历史
+            current_status = getattr(task, "status", "")
+            if current_status in ['completed', 'failed']:
+                if getattr(task, "_history_recorded_status", None) == current_status:
+                    logger.debug(
+                        "主线程任务更新完成（历史已记录）",
+                        event="ui_task_update_done",
+                        task_id=id(task),
+                        filename=filename,
+                        status=current_status,
+                    )
+                    return
+                size = task.downloaded_size if task.downloaded_size else 'N/A'
+                self.history_panel.add_record(
+                    filename=task.filename,
+                    url=task.url,
+                    status=current_status,
+                    size=size,
+                    headers=task.headers,
+                    engine=task.engine,
+                    save_dir=task.save_dir,
+                    selected_variant=getattr(task, 'selected_variant', None),
+                    master_url=getattr(task, 'master_url', None),
+                    media_url=getattr(task, 'media_url', None)
+                )
+                setattr(task, "_history_recorded_status", current_status)
+                logger.debug(
+                    "主线程历史记录写入完成",
+                    event="ui_task_update_history_done",
+                    task_id=id(task),
+                    filename=filename,
+                    status=current_status,
+                )
+
+            logger.debug(
+                "主线程任务更新完成",
+                event="ui_task_update_done",
+                task_id=id(task),
+                filename=filename,
+                status=getattr(task, "status", status),
+            )
+        except RuntimeError as exc:
+            logger.warning(
+                f"主线程任务更新跳过: {exc}",
+                event="ui_task_update_runtime_error",
+                task_id=id(task),
+                filename=filename,
+                status=getattr(task, "status", status),
+                error_type=type(exc).__name__,
+            )
+        except Exception as exc:
+            logger.error(
+                f"主线程任务更新失败: {exc}",
+                event="ui_task_update_failed",
+                task_id=id(task),
+                filename=filename,
+                status=getattr(task, "status", status),
+                error_type=type(exc).__name__,
+            )
 
     @pyqtSlot(object)
     def task_update_received(self, snapshot: TaskSnapshot) -> None:
@@ -335,12 +414,10 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
           owned by the worker thread and reading them from the UI
           thread would reintroduce the very race that the snapshot is
           designed to avoid.
-        * Heavy UI work (queue tree rendering, history persistence)
-          continues to live on the legacy raw-task path
-          (:meth:`_handle_task_update_on_main_thread`) until the
-          download queue panel is migrated in Stage 4 R26. This slot
-          is intentionally light-weight today; treat it as the stable,
-          forward-facing channel for new UI/telemetry consumers.
+        * Queue tree rendering is driven here from the immutable snapshot.
+          The legacy raw-task path
+          (:meth:`_handle_task_update_on_main_thread`) remains only for
+          control handles and terminal-state history persistence.
         """
         # Defensive shape check: if a caller accidentally emits a raw
         # ``DownloadTask`` through this channel we'd rather log and
@@ -353,12 +430,37 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
                 event="ui_task_snapshot_type_mismatch",
             )
             return
-        # Intentionally minimal: snapshot-only consumers (status bar
-        # widgets, telemetry, future mypy-strict modules) can read
-        # ``snapshot.status`` / ``snapshot.progress`` / etc. directly.
-        # The queue panel and history panel stay on the raw-task path
-        # until Stage 4 R26 completes the migration.
-        _ = snapshot.status  # touch to silence linters; no-op by design
+        # 下载队列显示现在由不可变 TaskSnapshot 驱动；raw DownloadTask
+        # 仅保留给控制按钮和历史记录，避免 queued signal 晚到时读取同一
+        # 可变对象的最终状态并覆盖实时进度。
+        try:
+            self.download_queue.add_or_update_snapshot(snapshot)
+            logger.debug(
+                "主线程下载队列快照刷新完成",
+                event="ui_task_snapshot_queue_done",
+                task_id=snapshot.task_id,
+                filename=snapshot.title,
+                status=snapshot.status,
+                progress=snapshot.progress,
+            )
+        except RuntimeError as exc:
+            logger.warning(
+                f"主线程下载队列快照刷新跳过: {exc}",
+                event="ui_task_snapshot_queue_runtime_error",
+                task_id=snapshot.task_id,
+                filename=snapshot.title,
+                status=snapshot.status,
+                error_type=type(exc).__name__,
+            )
+        except Exception as exc:
+            logger.error(
+                f"主线程下载队列快照刷新失败: {exc}",
+                event="ui_task_snapshot_queue_failed",
+                task_id=snapshot.task_id,
+                filename=snapshot.title,
+                status=snapshot.status,
+                error_type=type(exc).__name__,
+            )
 
     # ------------------------------------------------------------------
     # security-stability-hardening R5 — quick-manual script entry point
@@ -521,6 +623,18 @@ class MainWindow(MainWindowActionsMixin, MainWindowSniffFlowMixin, QMainWindow):
         logger.info(TR("log_closing"))
         self.catcatch_server.stop()
         self.download_manager.shutdown()
+        # ISS-34: 释放 BrowserView 的 Playwright driver
+        try:
+            if hasattr(self, "browser") and self.browser is not None:
+                self.browser.stop_browser()
+        except Exception:
+            logger.debug("main_window: browser.stop_browser() failed during closeEvent", exc_info=True)
+        # ISS-34: 释放组件更新 worker 线程
+        try:
+            if hasattr(self, "component_startup_worker") and self.component_startup_worker is not None:
+                self.component_startup_worker.shutdown()
+        except Exception:
+            logger.debug("main_window: component_startup_worker.shutdown() failed during closeEvent", exc_info=True)
         event.accept()
 
 
@@ -533,7 +647,7 @@ def summarize_component_entry_statuses(statuses: list) -> dict[str, int]:
     for status in statuses or []:
         total += 1
         raw_status = str(getattr(status, "status", "") or "").strip().lower()
-        if bool(getattr(status, "update_available", False)) or raw_status == "update_available":
+        if bool(getattr(status, "update_available", False)) or raw_status == "update_available" or raw_status == "remote_is_prerelease":
             updates += 1
         if raw_status == "missing":
             missing += 1

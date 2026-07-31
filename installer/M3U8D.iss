@@ -1,5 +1,5 @@
 #define AppName "M3U8D"
-#define AppVersion "0.4.1"
+#define AppVersion "0.5.0"
 #define RepoRoot ".."
 #define BuildRoot "..\dist\M3U8D"
 #define MainExeName "M3U8D.exe"
@@ -92,7 +92,10 @@ var
 
 function ShouldPromptDependencyConfirmation: Boolean;
 begin
-  { TODO: 后续改为基于 deps.json 与已安装文件的缺失检测。 }
+  { ISS-52: 已知限制——当前始终提示用户确认依赖下载。
+    基于 deps.json 与已安装文件的缺失检测需要 Inno Setup Pascal Script
+    解析 JSON 并遍历 bin/ 目录，复杂度较高且 iss 脚本调试不便，
+    暂不实现；安装后由 M3U8D 主程序的 DependencyChecker 做实际缺失检测。 }
   Result := True;
 end;
 

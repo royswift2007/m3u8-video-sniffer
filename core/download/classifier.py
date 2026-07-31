@@ -18,15 +18,17 @@ four modules; this file owns the classifier concern and exposes the same
 behaviour as the previous methods — callers pass the task (and optional
 message) explicitly.
 
-All functions in this module are pure: no I/O, no module-level caches,
-no random sources. This is the property the R18.5 property-based test
-relies on, and it is what makes the manager's retry loop deterministic
-under test.
+All functions in this module avoid I/O, module-level caches, and random
+sources. Playlist expiry classification reads wall-clock time only when
+explicit diagnostics include an ``expires_at`` timestamp; the remaining
+keyword and stage helpers stay deterministic for unit tests.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Mapping
+import time
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from utils.logger import logger
 
@@ -37,6 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover - imports only for type checkers
 __all__ = [
     "STOP_REASON_CLASSIFICATION",
     "classify_failure",
+    "classify_playlist_diagnostics",
     "classify_message_keywords",
     "detect_failure_stage",
 ]
@@ -134,12 +137,38 @@ def classify_failure(
             if isinstance(code, str) and code:
                 return code
 
-    # 3. Message keyword fallback + telemetry.
+        existing_error = (getattr(task, "error_message", "") or "").strip()
+        if message is None and not existing_error:
+            preflight_classification = classify_playlist_diagnostics(task, "")
+            if preflight_classification in {"drm", "expired"}:
+                logger.debug(
+                    "[classify] playlist_diagnostics_preflight",
+                    event="download_classify_playlist_diagnostics",
+                    classification="playlist_diagnostics_preflight",
+                    resolved=preflight_classification,
+                )
+                return preflight_classification
+
+    # 3. Playlist diagnostics attached during M3U8 parsing. These signals
+    # are more reliable than engine-specific free-form text for terminal DRM
+    # and already-expired signed URLs, but still come after stop/structured
+    # errors so authoritative runtime signals keep precedence.
     effective_message = message
     if effective_message is None and task is not None:
         effective_message = task.error_message or ""
     effective_message = effective_message or ""
 
+    diagnostic_classification = classify_playlist_diagnostics(task, effective_message)
+    if diagnostic_classification:
+        logger.debug(
+            "[classify] playlist_diagnostics",
+            event="download_classify_playlist_diagnostics",
+            classification="playlist_diagnostics",
+            resolved=diagnostic_classification,
+        )
+        return diagnostic_classification
+
+    # 4. Message keyword fallback + telemetry.
     classification = classify_message_keywords(effective_message)
     logger.debug(
         "[classify] fallback_message",
@@ -150,6 +179,68 @@ def classify_failure(
     return classification
 
 
+def classify_playlist_diagnostics(
+    task: "DownloadTask | None",
+    message: str | None = None,
+) -> str:
+    """Classify failures from playlist diagnostics attached to a task."""
+    if task is None:
+        return ""
+
+    diagnostics = getattr(task, "playlist_diagnostics", {}) or {}
+    if not isinstance(diagnostics, Mapping):
+        diagnostics = {}
+    text = (message or getattr(task, "error_message", "") or "").lower()
+
+    if bool(diagnostics.get("is_drm")):
+        return "drm"
+
+    expires_at = diagnostics.get("expires_at", getattr(task, "expires_at", None))
+    try:
+        expires_at_float = float(expires_at) if expires_at is not None else None
+    except (TypeError, ValueError):
+        expires_at_float = None
+    if expires_at_float is not None and expires_at_float <= time.time():
+        return "expired"
+
+    ephemeral = bool(diagnostics.get("ephemeral_url", getattr(task, "ephemeral_url", False)))
+    ttl_warning = bool(diagnostics.get("ttl_warning", getattr(task, "ttl_warning", False)))
+    if ephemeral and ttl_warning and any(
+        kw in text for kw in ("expired", "signature", "token", "403", "forbidden", "unauthorized")
+    ):
+        return "expired"
+
+    if bool(diagnostics.get("key_cross_domain")) and any(
+        kw in text
+        for kw in (
+            "key",
+            "ext-x-key",
+            "enc.key",
+            "decrypt",
+            "license",
+            "401",
+            "403",
+            "forbidden",
+            "unauthorized",
+        )
+    ):
+        return "key_cross_domain"
+
+    if bool(diagnostics.get("segment_cross_domain")) and any(
+        kw in text
+        for kw in ("segment", "fragment", "chunk", ".ts", ".m4s", "403", "forbidden", "404")
+    ):
+        return "segment_cross_domain"
+
+    if bool(diagnostics.get("variant_cross_domain")) and any(
+        kw in text for kw in ("m3u8", "playlist", "manifest", "403", "forbidden", "404")
+    ):
+        return "playlist_cross_domain"
+
+    return ""
+
+
+
 def classify_message_keywords(message: str) -> str:
     """Legacy keyword-based classifier (kept for R18.4 fallback)."""
     if not message:
@@ -157,12 +248,67 @@ def classify_message_keywords(message: str) -> str:
     text = message.lower()
     if "用户取消" in text or "用户暂停" in text or "cancelled" in text or "paused" in text:
         return "stopped"
+    if (
+        "drm" in text
+        or "widevine" in text
+        or "license request" in text
+        or "license server" in text
+        or "encrypted media" in text
+        or "encryptedmedia" in text
+    ):
+        return "drm"
+    if (
+        "signature expired" in text
+        or "token expired" in text
+        or "url expired" in text
+        or "link expired" in text
+        or "expired" in text
+    ):
+        return "expired"
+    if (
+        "geo restricted" in text
+        or "georestricted" in text
+        or "not available in your country" in text
+        or "region blocked" in text
+        or "地域" in text
+        or "地区限制" in text
+    ):
+        return "geo"
+    if (
+        "certificate" in text
+        or "cert verify" in text
+        or "ssl" in text
+        or "tls" in text
+    ):
+        return "tls"
+    if "429" in text or "too many requests" in text or "rate limit" in text or "ratelimit" in text:
+        return "rate_limit"
+    if "key cross-domain" in text or "key_cross_domain" in text or "跨域 key" in text:
+        return "key_cross_domain"
+    if "segment cross-domain" in text or "segment_cross_domain" in text or "分片跨域" in text:
+        return "segment_cross_domain"
+    if "playlist cross-domain" in text or "playlist_cross_domain" in text or "播放列表跨域" in text:
+        return "playlist_cross_domain"
     if "401" in text or "403" in text or "forbidden" in text or "unauthorized" in text:
         return "auth"
-    if "signature" in text or "nsig" in text or "parse" in text or "no video formats" in text:
-        return "parse"
     if "timeout" in text or "timed out" in text or "connection reset" in text:
         return "timeout"
+    if (
+        "no space" in text
+        or "disk full" in text
+        or "insufficient disk" in text
+        or "not enough space" in text
+    ):
+        return "disk"
+    if (
+        "segment noise" in text
+        or "single segment" in text
+        or "fragment-only" in text
+        or "疑似分片" in text
+    ):
+        return "segment_noise"
+    if "signature" in text or "nsig" in text or "parse" in text or "no video formats" in text:
+        return "parse"
     if "usage information" in text or "--help" in text or "unknown option" in text:
         return "parse"
     return "unknown"
@@ -176,8 +322,30 @@ def detect_failure_stage(message: str) -> str:
 
     if "cancelled" in text or "paused" in text or "用户取消" in text or "用户暂停" in text:
         return "stopped"
+    if (
+        "no space" in text
+        or "disk full" in text
+        or "insufficient disk" in text
+        or "not enough space" in text
+        or "write error" in text
+    ):
+        return "disk"
+    if "hls probe" in text or "probe" in text or "预探测" in text:
+        return "probe"
+    if (
+        "spawn" in text
+        or "popen" in text
+        or "engine_invoke" in text
+        or "cannot start" in text
+        or "failed to start" in text
+    ):
+        return "engine_start"
+    if "429" in text or "too many requests" in text or "rate limit" in text or "ratelimit" in text:
+        return "rate_limit"
     if "401" in text or "403" in text or "forbidden" in text or "unauthorized" in text:
         return "auth"
+    if "ext-x-key" in text or "enc.key" in text or "decrypt" in text or "key" in text:
+        return "key"
     if (
         "m3u8" in text
         or "master playlist" in text
@@ -185,10 +353,12 @@ def detect_failure_stage(message: str) -> str:
         or "manifest" in text
     ):
         return "playlist"
-    if "ext-x-key" in text or "enc.key" in text or "decrypt" in text:
-        return "key"
     if ".ts" in text or "segment" in text or "fragment" in text or "chunk" in text:
-        return "segment"
+        return "segment_download"
+    if "postprocess" in text or "post-process" in text:
+        return "postprocess"
     if "mux" in text or "merge" in text or "ffmpeg" in text:
         return "merge"
+    if "parse" in text or "extractor" in text or "no video formats" in text:
+        return "parse"
     return "unknown"

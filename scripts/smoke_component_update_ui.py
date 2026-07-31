@@ -300,6 +300,9 @@ def main() -> int:
         assert status_to_ui_state("update_available") == ("update", "component_status_update_available")
         assert status_to_ui_state("latest") == ("ok", "component_status_latest")
         assert status_to_ui_state("local_check_failed") == ("ok", "component_status_installed")
+        # Prerelease rows surface as an actionable "update" class so the row's
+        # update button is enabled (manual opt-in) rather than greyed out.
+        assert status_to_ui_state("remote_is_prerelease") == ("update", "component_status_remote_is_prerelease")
         assert summarize_rows(dialog._rows) == {"ok": 1, "update": 1, "error": 1}
 
         ffmpeg_action_btn = dialog.table.cellWidget(1, 7)

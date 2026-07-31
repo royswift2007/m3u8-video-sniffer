@@ -39,14 +39,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="同时下载建议依赖。",
     )
+    parser.add_argument(
+        "--include-optional",
+        action="store_true",
+        help="同时下载可选依赖。",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="下载必须、建议和可选依赖。",
+    )
     return parser.parse_args(argv)
 
 
 def resolve_categories(args: argparse.Namespace) -> tuple[str, ...]:
     """Resolve install categories from CLI options."""
+    if args.all:
+        return ("required", "recommended", "optional")
+
     categories = ["required"]
     if args.include_recommended:
         categories.append("recommended")
+    if args.include_optional:
+        categories.append("optional")
     return tuple(categories)
 
 

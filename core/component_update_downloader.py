@@ -864,14 +864,53 @@ class ComponentUpdateDownloader:
             return self._tofu_pin_path_override
         return Path.home() / ".m3u8d" / "component_pins.json"
 
+    # F-06: built-in salt mixed into the TOFU pin HMAC key so the
+    # key is not solely machine-identity-derived (raises the bar for an
+    # attacker who can read the pin file but not the source). Bumping
+    # this salt invalidates all existing pin files (treated as first-
+    # time install), which is the desired behaviour after a key rotation.
+    _TOFU_HMAC_SALT: str = "m3u8d-tofu-pin-v1"
+
+    def _tofu_hmac_key(self) -> bytes:
+        """Derive the HMAC key for the pin file.
+
+        The key blends a built-in salt with a best-effort machine
+        identifier (hostname + platform UUID). An attacker who can
+        already write ``~/.m3u8d/component_pins.json`` has local write
+        access and is therefore already in a strong position; the HMAC
+        is defence-in-depth that prevents a *blind* overwrite of an
+        arbitrary sha256 (e.g. via a side channel that can write but
+        not execute code) from being accepted. Failure to derive a
+        stable key degrades to a constant key + a warning.
+        """
+        import hmac as _hmac  # local import; module-level import kept lean
+        try:
+            machine_id = f"{socket.gethostname()}|{uuid.getnode()}|{sys.platform}"
+        except Exception:
+            machine_id = "unknown-machine"
+        key_material = f"{self._TOFU_HMAC_SALT}:{machine_id}".encode("utf-8")
+        # Derive a fixed-length key via sha256 to avoid HMAC key-size
+        # quirks across platforms.
+        return hashlib.sha256(key_material).digest()
+
+    def _tofu_compute_hmac(self, pins_json: str) -> str:
+        """Return the hex HMAC-SHA256 of the canonical pins JSON."""
+        import hmac as _hmac
+        return _hmac.new(self._tofu_hmac_key(), pins_json.encode("utf-8"), hashlib.sha256).hexdigest()
+
     def _load_tofu_pins(self) -> dict[str, Any]:
         """Return the on-disk pin map, or ``{}`` on any read error.
 
-        The pin file is opaque to users; corruption / missing / unreadable
-        is handled by starting fresh rather than failing the update. A
-        legitimate "new version" path would also drop the old pin and
-        write a new one, so a broken pin file effectively behaves like
-        a first-time-install scenario.
+        F-06: the pin file is now a ``{"pins": {...}, "hmac": "..."}``
+        envelope. The HMAC is verified with a machine-identity-derived
+        key so a blind overwrite of the pins map (without the ability
+        to recompute the HMAC) is rejected and the file is treated as a
+        first-time install (pins reset to ``{}``). A missing / corrupt /
+        unparseable file likewise returns ``{}``.
+
+        Legacy pin files that are a bare ``{...}`` dict (pre-F-06) are
+        detected and migrated: their contents are kept once, then the
+        next ``_save_tofu_pins`` re-writes them in the envelope form.
         """
 
         path = self._tofu_pin_path()
@@ -882,10 +921,41 @@ class ComponentUpdateDownloader:
             return {}
         if not isinstance(data, dict):
             return {}
-        return data
+
+        # Legacy bare-dict form: migrate once (trust on first migration;
+        # subsequent saves will write the HMAC envelope).
+        if "pins" not in data and "hmac" not in data:
+            return data
+
+        envelope_pins = data.get("pins")
+        stored_hmac = data.get("hmac")
+        if not isinstance(envelope_pins, dict) or not isinstance(stored_hmac, str):
+            logger.warning(
+                "TOFU pin file has malformed envelope; resetting pins "
+                "event=tofu_pin_tampered stage=tofu_load"
+            )
+            return {}
+
+        # Verify the HMAC over the canonical pins JSON.
+        canonical = json.dumps(envelope_pins, indent=2, sort_keys=True, ensure_ascii=False)
+        expected = self._tofu_compute_hmac(canonical)
+        import hmac as _hmac
+        if not _hmac.compare_digest(expected, stored_hmac):
+            logger.warning(
+                "TOFU pin file HMAC mismatch; treating as tampered and resetting "
+                "event=tofu_pin_tampered stage=tofu_load"
+            )
+            return {}
+        return envelope_pins
 
     def _save_tofu_pins(self, pins: dict[str, Any]) -> None:
         """Persist the pin map atomically under ``~/.m3u8d/``.
+
+        F-06: the file is written as a ``{"pins": {...}, "hmac": "..."}``
+        envelope where ``hmac`` is an HMAC-SHA256 over the canonical
+        pins JSON, keyed by a machine-identity-derived secret. This
+        gives the pin file self-contained integrity so a blind write
+        of an attacker-chosen sha256 cannot pass TOFU verification.
 
         Best-effort POSIX 0o600 / Windows DACL tightening is delegated
         to the same helpers ``catcatch_server`` uses for the session
@@ -896,7 +966,12 @@ class ComponentUpdateDownloader:
         path = self._tofu_pin_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            payload = json.dumps(pins, indent=2, sort_keys=True, ensure_ascii=False)
+            canonical = json.dumps(pins, indent=2, sort_keys=True, ensure_ascii=False)
+            envelope = {
+                "pins": pins,
+                "hmac": self._tofu_compute_hmac(canonical),
+            }
+            payload = json.dumps(envelope, indent=2, sort_keys=True, ensure_ascii=False)
             tmp_path = path.with_suffix(path.suffix + ".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(payload)

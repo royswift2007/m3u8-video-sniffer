@@ -176,11 +176,26 @@ def main():
     args = parse_args()
     _merge_chromium_flags()
 
+    # F-07: if the legacy protocol-handoff rollback escape hatch is
+    # armed, surface a prominent startup warning so operators and
+    # auditors see that the session-token + Origin handshake is being
+    # bypassed on every ``m3u8dl://`` trigger. The structured event tag
+    # matches the one the protocol handler emits per-call.
+    import os as _os
+    if _os.environ.get("M3U8D_HANDOFF_LEGACY") == "1":
+        logger.warning(
+            "[security] M3U8D_HANDOFF_LEGACY=1 is set; the protocol "
+            "handler will bypass the session-token + Origin handshake "
+            "(rollback / diagnostic mode). Disable for normal use.",
+            event="protocol_handler_legacy_handoff",
+            env_var="M3U8D_HANDOFF_LEGACY",
+        )
+
     app = QApplication(sys.argv)
     app.setApplicationName("M3U8 Video Sniffer")
     app.setOrganizationName("M3U8VideoSniffer")
 
-    icon_path = Path(__file__).parent / "resources" / "icon.png"
+    icon_path = Path(__file__).parent / "resources" / "mvs.ico"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 

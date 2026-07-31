@@ -2,8 +2,8 @@
     "version": 1,
     "download_dir": "C:\\Users\\qinghua\\Downloads",
     "temp_dir": "C:\\Users\\qinghua\\AppData\\Local\\Temp\\M3U8Sniffer",
-    "max_concurrent_downloads": 5,
-    "speed_limit": 3,
+    "max_concurrent_downloads": 3,
+    "speed_limit": 20,
     "max_retry_attempts": 3,
     "retry_backoff_seconds": 2,
     "site_rules": [],
@@ -20,47 +20,70 @@
         "download_engine_fallback": true,
         "download_auth_retry_first": true,
         "download_auth_retry_per_engine": 1,
+        "download_rate_limit_backoff_multiplier": 3,
         "download_candidate_ranking_enabled": true,
+        "failure_strategy_enabled": true,
+        "rate_limit_low_concurrency_enabled": true,
         "network_verify_tls": true,
         "hls_probe_enabled": true,
         "hls_probe_hard_fail": true,
+        "hls_probe_extended_soft_fail_enabled": true,
         "allow_segment_probe_soft_fail": true,
+        "enhanced_header_capture_enabled": true,
+        "temporary_cookie_forwarding_enabled": false,
         "browser_capture_window_enabled": true,
         "browser_capture_window_seconds": 12,
         "browser_capture_extend_on_hit_seconds": 4,
         "browser_capture_probe_interval_ms": 1000,
+        "segment_suppression_enabled": true,
+        "segment_suppression_threshold": 3,
+        "segment_advanced_view_enabled": false,
+        "forward_cookie_headers": true,
+        "forward_authorization_headers": false,
         "ui_batch_actions": true,
-        "ui_filter_search": true
+        "ui_filter_search": true,
+        "exact_request_header_replay_enabled": true,
+        "resource_domain_cookie_lookup_enabled": true,
+        "ephemeral_m3u8_refresh_enabled": false,
+        "ephemeral_m3u8_refresh_timeout_ms": 15000,
+        "playlist_diagnostics_enabled": true,
+        "adaptive_low_concurrency_enabled": true
     },
     "engines": {
         "n_m3u8dl_re": {
-            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\N_m3u8DL-RE.exe",
-            "thread_count": 5,
+            "path": "C:\\Users\\qinghua\\Documents\\M3U8D\\bin\\N_m3u8DL-RE.exe",
+            "thread_count": 20,
             "thread_min": 4,
             "thread_max": 32,
             "retry_count": 3,
             "max_retry": 5,
+            "low_concurrency_thread_count": 1,
             "adaptive": false,
             "output_format": "mp4"
         },
         "ytdlp": {
-            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\yt-dlp.exe"
+            "path": "C:\\Users\\qinghua\\Documents\\M3U8D\\bin\\yt-dlp.exe"
         },
         "streamlink": {
-            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\streamlink.exe"
+            "path": "C:\\Users\\qinghua\\Documents\\M3U8D\\bin\\streamlink.exe"
         },
         "aria2": {
-            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\aria2c.exe",
-            "max_connection_per_server": 16,
-            "split": 16
+            "path": "C:\\Users\\qinghua\\Documents\\M3U8D\\bin\\aria2c.exe",
+            "max_connection_per_server": 2,
+            "split": 2,
+            "low_connection_count": 1
         },
         "ffmpeg": {
-            "path": "c:\\Users\\qinghua\\Documents\\M3U8D\\bin\\ffmpeg.exe"
+            "path": "C:\\Users\\qinghua\\Documents\\M3U8D\\bin\\ffmpeg.exe"
         }
     },
     "notification_enabled": true,
     "auto_delete_temp": true,
-    "language": "en",
+    "language": "zh",
+    "security": {
+        "allow_private_networks": false
+    },
+    "tunables": {},
     "proxy": {
         "enabled": false,
         "http": "",

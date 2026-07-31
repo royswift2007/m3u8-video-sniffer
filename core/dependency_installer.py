@@ -5,6 +5,7 @@ Dependency download and installation helpers.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import shutil
@@ -19,6 +20,7 @@ from typing import Any
 
 from core.app_paths import (
     get_bin_dir,
+    get_data_root,
     get_dependency_manifest_path,
     get_temp_dir,
     resolve_app_path,
@@ -32,6 +34,15 @@ DOWNLOAD_USER_AGENT = "M3U8D Dependency Installer/1.0"
 
 
 @dataclass(frozen=True)
+class ResolvedDependencyDownload:
+    """Resolved dependency download URL and version identity."""
+
+    url: str
+    version_key: str
+    display_version: str | None = None
+
+
+@dataclass(frozen=True)
 class DependencyInstallSpec:
     """Installable dependency definition loaded from deps.json."""
 
@@ -40,6 +51,7 @@ class DependencyInstallSpec:
     relative_path: str
     category: str
     download: dict[str, Any] | None = None
+    checksum: dict[str, Any] | None = None
 
     @property
     def path(self) -> Path:
@@ -171,9 +183,11 @@ class DependencyInstaller:
         self,
         manifest_path: Path | None = None,
         progress_callback: DependencyProgressCallback | None = None,
+        update_existing: bool = False,
     ):
         self.manifest_path = manifest_path or get_dependency_manifest_path()
         self.progress_callback = progress_callback
+        self.update_existing = bool(update_existing)
         self._specs_by_id = self._load_specs_by_id()
 
     def install_category(
@@ -264,6 +278,10 @@ class DependencyInstaller:
                 download = raw_entry.get("download")
                 if download is not None and not isinstance(download, dict):
                     raise ValueError(f"{TR('log_dep_download_object')}: {category}[{index}]")
+                raw_update = raw_entry.get("update")
+                if raw_update is not None and not isinstance(raw_update, dict):
+                    raise ValueError(f"update 字段必须是对象: {category}[{index}]")
+                checksum = self._extract_checksum_config(download, raw_update)
 
                 specs_by_id[dependency_id] = DependencyInstallSpec(
                     id=dependency_id,
@@ -271,6 +289,7 @@ class DependencyInstaller:
                     relative_path=relative_path,
                     category=category,
                     download=download,
+                    checksum=checksum,
                 )
         return specs_by_id
 
@@ -297,6 +316,7 @@ class DependencyInstaller:
                         relative_path=entry.relative_path,
                         category=entry.category,
                         download=None,
+                        checksum=entry.update.checksum if entry.update else None,
                     )
                 )
                 continue
@@ -326,28 +346,103 @@ class DependencyInstaller:
     ) -> DependencyInstallItemResult:
         target_path = spec.path
         target_text = str(target_path)
+        resolved_download: ResolvedDependencyDownload | None = None
 
         if target_path.exists():
-            logger.info(
-                TR("log_dep_exists_skip"),
-                dependency=spec.id,
-                target=target_text,
-            )
+            if not self.update_existing:
+                logger.info(
+                    TR("log_dep_exists_skip"),
+                    dependency=spec.id,
+                    target=target_text,
+                )
+                self._emit_progress(
+                    event="item_skipped",
+                    category=category,
+                    current_index=current_index,
+                    total_count=total_count,
+                    spec=spec,
+                    detail=TR("log_dep_target_exists_detail"),
+                )
+                return DependencyInstallItemResult(
+                    entry_id=spec.id,
+                    label=spec.label,
+                    target_path=target_text,
+                    success=True,
+                    skipped=True,
+                )
+
+            if not spec.download:
+                logger.info(
+                    TR("log_dep_exists_skip"),
+                    dependency=spec.id,
+                    target=target_text,
+                )
+                self._emit_progress(
+                    event="item_skipped",
+                    category=category,
+                    current_index=current_index,
+                    total_count=total_count,
+                    spec=spec,
+                    detail="已存在且没有下载配置，跳过更新",
+                )
+                return DependencyInstallItemResult(
+                    entry_id=spec.id,
+                    label=spec.label,
+                    target_path=target_text,
+                    success=True,
+                    skipped=True,
+                )
+
             self._emit_progress(
-                event="item_skipped",
+                event="item_checking",
                 category=category,
                 current_index=current_index,
                 total_count=total_count,
                 spec=spec,
-                detail=TR("log_dep_target_exists_detail"),
+                detail="正在检查更新",
             )
-            return DependencyInstallItemResult(
-                entry_id=spec.id,
-                label=spec.label,
-                target_path=target_text,
-                success=True,
-                skipped=True,
-            )
+            try:
+                resolved_download = self._resolve_download_info(spec.download)
+            except Exception as exc:
+                detail = f"更新检查失败，保留现有文件: {exc}"
+                logger.warning(
+                    "dependency update check failed; keeping existing file",
+                    dependency=spec.id,
+                    error=exc,
+                )
+                self._emit_progress(
+                    event="item_skipped",
+                    category=category,
+                    current_index=current_index,
+                    total_count=total_count,
+                    spec=spec,
+                    detail=detail,
+                )
+                return DependencyInstallItemResult(
+                    entry_id=spec.id,
+                    label=spec.label,
+                    target_path=target_text,
+                    success=True,
+                    skipped=True,
+                )
+
+            current_state = self._get_dependency_state(spec.id)
+            if current_state.get("version_key") == resolved_download.version_key:
+                self._emit_progress(
+                    event="item_skipped",
+                    category=category,
+                    current_index=current_index,
+                    total_count=total_count,
+                    spec=spec,
+                    detail=f"已是最新版本: {resolved_download.display_version or resolved_download.version_key}",
+                )
+                return DependencyInstallItemResult(
+                    entry_id=spec.id,
+                    label=spec.label,
+                    target_path=target_text,
+                    success=True,
+                    skipped=True,
+                )
 
         if not spec.download:
             message = TR("log_dep_no_download_config")
@@ -375,7 +470,9 @@ class DependencyInstaller:
 
         try:
             download_type = str(spec.download.get("type") or "").strip().lower()
-            download_url = self._resolve_download_url(spec.download)
+            if resolved_download is None:
+                resolved_download = self._resolve_download_info(spec.download)
+            download_url = resolved_download.url
 
             logger.info(
                 TR("log_dep_start_install"),
@@ -458,6 +555,9 @@ class DependencyInstaller:
                 error=message,
             )
 
+        if resolved_download is not None:
+            self._record_dependency_state(spec, resolved_download)
+
         logger.info(
             TR("log_dep_install_completed"),
             dependency=spec.id,
@@ -476,6 +576,19 @@ class DependencyInstaller:
             label=spec.label,
             target_path=target_text,
             success=True,
+        )
+
+    def _resolve_download_info(self, download: dict[str, Any]) -> ResolvedDependencyDownload:
+        """Resolve download URL and derive a stable version key for update checks."""
+        url = self._resolve_download_url(download)
+        source = str(download.get("source") or "direct").strip().lower()
+        explicit_version = str(download.get("version_key") or download.get("version") or "").strip()
+        version_key = explicit_version or f"{source}:{url}"
+        display_version = str(download.get("display_version") or download.get("version") or "").strip() or None
+        return ResolvedDependencyDownload(
+            url=url,
+            version_key=version_key,
+            display_version=display_version,
         )
 
     def _resolve_download_url(self, download: dict[str, Any]) -> str:
@@ -525,6 +638,67 @@ class DependencyInstaller:
         raise FileNotFoundError(
             f"{TR('log_dep_github_asset_not_found')}: {repo} / {asset_pattern}"
         )
+
+    @staticmethod
+    def _dependency_state_path() -> Path:
+        return get_data_root() / "dependency_state.json"
+
+    def _load_dependency_state(self) -> dict[str, Any]:
+        state_path = self._dependency_state_path()
+        try:
+            with open(state_path, "r", encoding="utf-8") as state_file:
+                payload = json.load(state_file)
+        except FileNotFoundError:
+            return {"dependencies": {}}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "dependency state read failed; using empty state",
+                error=exc,
+            )
+            return {"dependencies": {}}
+
+        if not isinstance(payload, dict):
+            return {"dependencies": {}}
+        dependencies = payload.get("dependencies")
+        if not isinstance(dependencies, dict):
+            payload["dependencies"] = {}
+        return payload
+
+    def _get_dependency_state(self, dependency_id: str) -> dict[str, Any]:
+        payload = self._load_dependency_state()
+        dependencies = payload.get("dependencies")
+        if not isinstance(dependencies, dict):
+            return {}
+        state = dependencies.get(dependency_id)
+        return state if isinstance(state, dict) else {}
+
+    def _record_dependency_state(
+        self,
+        spec: DependencyInstallSpec,
+        resolved_download: ResolvedDependencyDownload,
+    ) -> None:
+        payload = self._load_dependency_state()
+        dependencies = payload.setdefault("dependencies", {})
+        if not isinstance(dependencies, dict):
+            dependencies = {}
+            payload["dependencies"] = dependencies
+
+        dependencies[spec.id] = {
+            "path": spec.relative_path,
+            "version_key": resolved_download.version_key,
+        }
+        if resolved_download.display_version:
+            dependencies[spec.id]["display_version"] = resolved_download.display_version
+
+        state_path = self._dependency_state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = state_path.with_name(f".{state_path.name}.tmp")
+        with open(temp_path, "w", encoding="utf-8") as state_file:
+            json.dump(payload, state_file, ensure_ascii=False, indent=2)
+            state_file.write("\n")
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        os.replace(temp_path, state_path)
 
     def _emit_progress(
         self,
@@ -577,6 +751,7 @@ class DependencyInstaller:
                 current_index=current_index,
                 total_count=total_count,
             )
+            self._verify_download_checksum(spec, temp_path, Path(urllib.parse.urlparse(url).path).name)
             spec.path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(temp_path, spec.path)
         finally:
@@ -606,6 +781,7 @@ class DependencyInstaller:
                 current_index=current_index,
                 total_count=total_count,
             )
+            self._verify_download_checksum(spec, archive_path, Path(urllib.parse.urlparse(url).path).name)
             self._extract_zip_member(archive_path, member_name, extracted_path)
             spec.path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(extracted_path, spec.path)
@@ -685,6 +861,115 @@ class DependencyInstaller:
             with archive_file.open(matched_member, "r") as source_file:
                 with open(destination, "wb") as output_file:
                     shutil.copyfileobj(source_file, output_file, length=1024 * 1024)
+
+    @staticmethod
+    def _extract_checksum_config(
+        download: dict[str, Any] | None,
+        update: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        candidates: list[Any] = []
+        if isinstance(download, dict):
+            candidates.append(download.get("checksum"))
+        if isinstance(update, dict):
+            candidates.append(update.get("checksum"))
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                return candidate
+        return None
+
+    def _verify_download_checksum(
+        self,
+        spec: DependencyInstallSpec,
+        file_path: Path,
+        asset_filename: str,
+    ) -> str | None:
+        expected = self._expected_download_sha256(spec, asset_filename)
+        if expected is None:
+            logger.warning(
+                "dependency_installer: no sha256 configured; weak validation only",
+                dependency=spec.id,
+                target=str(file_path),
+            )
+            return None
+
+        actual = self._sha256_file(file_path)
+        if actual.lower() != expected.lower():
+            self._cleanup_file(file_path)
+            raise ValueError("sha256 checksum mismatch")
+        return actual
+
+    def _expected_download_sha256(
+        self,
+        spec: DependencyInstallSpec,
+        asset_filename: str,
+    ) -> str | None:
+        checksum = spec.checksum
+        if not isinstance(checksum, dict):
+            return None
+        for key in ("sha256", "SHA256"):
+            value = checksum.get(key)
+            if value:
+                text = str(value).strip().lower()
+                return text if self._is_sha256_hex(text) else None
+        sha_url = checksum.get("sha256_url") or checksum.get("SHA256_URL")
+        if sha_url:
+            try:
+                return self._fetch_expected_sha256(str(sha_url), asset_filename)
+            except Exception as exc:
+                logger.warning(
+                    "dependency_installer: sha256 sidecar fetch failed",
+                    dependency=spec.id,
+                    error=exc,
+                )
+                raise ValueError("sha256 sidecar fetch failed") from exc
+        return None
+
+    def _fetch_expected_sha256(self, sha_url: str, asset_filename: str) -> str | None:
+        request = urllib.request.Request(
+            sha_url,
+            headers={
+                "Accept": "text/plain,*/*",
+                "User-Agent": DOWNLOAD_USER_AGENT,
+            },
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("sha256 sidecar too large")
+        text = raw.decode("utf-8", errors="replace")
+        return self._parse_sha256_sidecar(text, asset_filename)
+
+    @classmethod
+    def _parse_sha256_sidecar(cls, text: str, asset_filename: str) -> str | None:
+        stripped = (text or "").strip()
+        if cls._is_sha256_hex(stripped):
+            return stripped.lower()
+        target = Path(asset_filename).name.lower()
+        for raw_line in (text or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.replace("*", " ").split()
+            if len(parts) < 2:
+                continue
+            first, last = parts[0], parts[-1]
+            if cls._is_sha256_hex(first) and Path(last).name.lower() == target:
+                return first.lower()
+            if cls._is_sha256_hex(last) and Path(first).name.lower() == target:
+                return last.lower()
+        return None
+
+    @staticmethod
+    def _is_sha256_hex(value: str) -> bool:
+        return len(value) == 64 and all(char in "0123456789abcdefABCDEF" for char in value)
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as input_file:
+            for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _find_zip_member(

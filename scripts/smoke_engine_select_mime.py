@@ -34,6 +34,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.download_context import EngineSelectContext, RESOURCE_TYPE_UNKNOWN  # noqa: E402
 from core import engine_selector as es  # noqa: E402
 from core.engine_selector import (  # noqa: E402
     ENGINE_ARIA2,
@@ -135,7 +136,11 @@ def assert_extension_match_strips_query() -> None:
     es.ssrf_guard.ensure_public = _blocked  # type: ignore[assignment]
     try:
         decision = select_engine(
-            "https://example.invalid/video.mp4?token=abc&sig=xyz"
+            "https://example.invalid/video.mp4?token=abc&sig=xyz",
+            context=EngineSelectContext(
+                url="https://example.invalid/video.mp4?token=abc&sig=xyz",
+                resource_type=RESOURCE_TYPE_UNKNOWN,
+            ),
         )
     finally:
         es._requests = original_requests  # type: ignore[assignment]
@@ -160,7 +165,13 @@ def assert_head_mime_probe_overrides_extension() -> None:
     es._requests = patched  # type: ignore[assignment]
     es.ssrf_guard.ensure_public = _patched_ensure_public  # type: ignore[assignment]
     try:
-        decision = select_engine("https://cdn.example.invalid/stream.mp4")
+        decision = select_engine(
+            "https://cdn.example.invalid/stream.mp4",
+            context=EngineSelectContext(
+                url="https://cdn.example.invalid/stream.mp4",
+                resource_type=RESOURCE_TYPE_UNKNOWN,
+            ),
+        )
     finally:
         es._requests = original_requests  # type: ignore[assignment]
         es.ssrf_guard.ensure_public = original_ensure_public  # type: ignore[assignment]

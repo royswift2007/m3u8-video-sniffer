@@ -8,6 +8,7 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any, cast
 
 from core.app_paths import get_logs_dir
 from utils.log_retention import CapacityManagedFileHandler
@@ -42,7 +43,7 @@ class DailyRolloverMixin:
     # ``CapacityManagedFileHandler`` respectively. Declared here only as
     # documentation for readers of the mixin.
     baseFilename: str
-    stream: object  # type: ignore[assignment]
+    stream: logging.StreamHandler | None  # ISS-19: narrowed from ``object``
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -67,7 +68,7 @@ class DailyRolloverMixin:
             # within the same day would spam stderr and risk wedging the
             # handler. A subsequent day change will get another attempt.
             self._current_day = today
-        super().emit(record)
+        cast(Any, super()).emit(record)
 
     # ----------------------------------------------------------------- private
     def doRollover(self) -> None:
@@ -183,7 +184,11 @@ class Logger:
             file_handler = DailyCapacityManagedFileHandler(
                 log_file, encoding='utf-8'
             )
-            file_handler.setLevel(logging.DEBUG)
+            # ``CapacityManagedFileHandler`` owns the file threshold:
+            # default INFO, ``M3U8D_LOG_DEBUG=1`` for troubleshooting, or
+            # ``M3U8D_LOG_LEVEL=WARNING/ERROR`` for quieter background logs.
+            # Do not force DEBUG here, otherwise high-frequency progress
+            # traces make ``m3u8sniffer.log`` grow very quickly.
             file_format = logging.Formatter(
                 '%(asctime)s [%(levelname)s] %(message)s',
                 datefmt='%Y-%m-%d %H:%M:%S'

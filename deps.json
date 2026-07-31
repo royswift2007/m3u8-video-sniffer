@@ -63,8 +63,9 @@
         "version_regex": "(?P<version>v?\\d+(?:\\.\\d+)+(?:[-\\w.]*)?)",
         "install_strategy": "replace_zip_member",
         "requires_process_free": true,
+        "allow_prerelease": false,
         "checksum": {
-          "comment": "Upstream ships no sha256 sidecar; verified via TOFU: the first successful update pins the zip digest under ~/.m3u8d/component_pins.json and subsequent updates compare against that pin. Asset URL must live on github.com."
+          "comment": "Upstream ships no sha256 sidecar; verified via TOFU: the first successful update pins the zip digest under ~/.m3u8d/component_pins.json and subsequent updates compare against that pin. Asset URL must live on github.com. NOTE: nilaoda/N_m3u8DL-RE has shipped a beta (v0.6.0-beta) as the GitHub 'latest' release; allow_prerelease defaults to false so the stable install is NOT silently replaced by an unvetted beta."
         }
       }
     },
@@ -84,7 +85,7 @@
           "{path}",
           "-version"
         ],
-        "regex": "ffmpeg version\\s+(?P<version>\\S+)",
+        "regex": "ffmpeg version\\s+(?P<version>\\d+(?:\\.\\d+)+)",
         "normalize": "strip_v",
         "timeout": 15
       },

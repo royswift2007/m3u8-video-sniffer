@@ -22,3 +22,30 @@ env/
 # 编辑器配置
 .vscode/
 .idea/
+
+# ISS-49: 补全忽略规则
+# 临时目录
+Temp/
+temp/
+
+# 运行时日志
+logs/
+
+# pytest 缓存
+.pytest_cache/
+
+# mypy / pyright 缓存
+.mypy_cache/
+.pyright/
+
+# 备份文件
+*.bak
+
+# 调试残留
+missing*.txt
+*.lnk
+
+# OS 生成文件
+Thumbs.db
+Desktop.ini
+.DS_Store

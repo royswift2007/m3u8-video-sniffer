@@ -1,9 +1,12 @@
 {
   "include": [
-    "core/task_model.py",
-    "ui/main_window.py",
-    "ui/main_window_actions.py",
-    "ui/main_window_sniff_flow.py"
+    "core/",
+    "engines/",
+    "ui/",
+    "utils/",
+    "main.py",
+    "protocol_handler.pyw",
+    "mvs.pyw"
   ],
   "exclude": [
     "**/build",
@@ -13,7 +16,7 @@
     "**/__pycache__",
     "installer/output"
   ],
-  "pythonVersion": "3.10",
+  "pythonVersion": "3.14",
   "typeCheckingMode": "basic",
   "reportArgumentType": "error",
   "reportGeneralTypeIssues": "error",

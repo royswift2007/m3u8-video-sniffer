@@ -1,24 +1,24 @@
 @echo off
-echo æ­£åœ¨å¯åŠ¨ Chrome é…ç½®æ¨¡å¼...
-echo è¯·åœ¨æ­¤æ‰“å¼€çš„ Chrome çª—å£ä¸­å®‰è£…æ‰€éœ€çš„æ‰©å±•æ’ä»¶ã€‚
-echo å®‰è£…å®Œæˆåï¼Œè¯·å…³é—­ Chrome çª—å£ï¼Œç„¶åå†é‡æ–°è¿è¡Œ M3U8VideoSniffer ç¨‹åºã€‚
+echo ÕıÔÚÆô¶¯ Chrome ÅäÖÃÄ£Ê½...
+echo ÇëÔÚ´Ë´ò¿ªµÄ Chrome ´°¿ÚÖĞ°²×°ËùĞèµÄÀ©Õ¹²å¼ş¡£
+echo °²×°Íê³Éºó£¬Çë¹Ø±Õ Chrome ´°¿Ú£¬È»ºóÔÙÖØĞÂÔËĞĞ M3U8VideoSniffer ³ÌĞò¡£
 
-rem è®¾ç½®ç”¨æˆ·æ•°æ®ç›®å½• (äº python ä»£ç ä¸­ä¸€è‡´)
+rem ÉèÖÃÓÃ»§Êı¾İÄ¿Â¼ (ÓÚ python ´úÂëÖĞÒ»ÖÂ)
 set "USER_DATA=%APPDATA%\M3U8VideoSniffer\chromium_user_data"
 
-rem å°è¯•æŸ¥æ‰¾ Chrome å®‰è£…è·¯å¾„
+rem ³¢ÊÔ²éÕÒ Chrome °²×°Â·¾¶
 if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (
     set "CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe"
 ) else if exist "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" (
     set "CHROME_PATH=C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
 ) else (
-    echo [é”™è¯¯] æœªèƒ½æ‰¾åˆ° Google Chrome å®‰è£…è·¯å¾„ï¼Œè¯·ç¡®è®¤å·²å®‰è£… Chromeã€‚
+    echo [´íÎó] Î´ÄÜÕÒµ½ Google Chrome °²×°Â·¾¶£¬ÇëÈ·ÈÏÒÑ°²×° Chrome¡£
     pause
     exit /b
 )
 
-echo ä½¿ç”¨æ•°æ®ç›®å½•: "%USER_DATA%"
+echo Ê¹ÓÃÊı¾İÄ¿Â¼: "%USER_DATA%"
 "%CHROME_PATH%" --user-data-dir="%USER_DATA%" --no-first-run
 
-echo Chrome å·²å…³é—­ã€‚
+echo Chrome ÒÑ¹Ø±Õ¡£
 pause

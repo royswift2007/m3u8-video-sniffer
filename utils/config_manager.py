@@ -283,7 +283,7 @@ class ConfigManager:
                         return default
                 else:
                     return default
-            if value == "" or value is None:
+            if value is None:
                 return default
             return value
 
@@ -339,15 +339,26 @@ class ConfigManager:
                 "download_engine_fallback": True,
                 "download_auth_retry_first": True,
                 "download_auth_retry_per_engine": 1,
+                "download_rate_limit_backoff_multiplier": 3,
                 "download_candidate_ranking_enabled": True,
+                "failure_strategy_enabled": True,
+                "rate_limit_low_concurrency_enabled": True,
                 "network_verify_tls": True,
                 "hls_probe_enabled": True,
                 "hls_probe_hard_fail": True,
+                "hls_probe_extended_soft_fail_enabled": True,
                 "allow_segment_probe_soft_fail": True,
+                "enhanced_header_capture_enabled": True,
+                "temporary_cookie_forwarding_enabled": False,
                 "browser_capture_window_enabled": True,
                 "browser_capture_window_seconds": 12,
                 "browser_capture_extend_on_hit_seconds": 4,
                 "browser_capture_probe_interval_ms": 1000,
+                "segment_suppression_enabled": True,
+                "segment_suppression_threshold": 3,
+                "segment_advanced_view_enabled": False,
+                "forward_cookie_headers": True,
+                "forward_authorization_headers": False,
                 "ui_batch_actions": True,
                 "ui_filter_search": True,
             },
@@ -359,6 +370,7 @@ class ConfigManager:
                     "thread_max": 32,
                     "retry_count": 5,
                     "max_retry": 5,
+                    "low_concurrency_thread_count": 1,
                     "adaptive": False,
                     "output_format": "mp4",
                 },
@@ -370,8 +382,11 @@ class ConfigManager:
                 },
                 "aria2": {
                     "path": str(get_bin_path("aria2c.exe")),
-                    "max_connection_per_server": 16,
-                    "split": 16,
+                    # Keep low by default: many signed CDN/direct links (e.g. Streamtape)
+                    # reject aggressive multi-connection Range downloads.
+                    "max_connection_per_server": 2,
+                    "split": 2,
+                    "low_connection_count": 1,
                 },
                 "ffmpeg": {
                     "path": str(get_bin_path("ffmpeg.exe")),
@@ -380,6 +395,39 @@ class ConfigManager:
             "notification_enabled": True,
             "auto_delete_temp": True,
             "language": "zh",
+            "security": {
+                # F-02: explicit opt-in for private-network downloads.
+                # Default False (fail-closed). When True, ensure_public()
+                # accepts RFC1918 / loopback / link-local targets but
+                # logs a prominent ``ssrf_private_allowed`` warning so
+                # audit trails surface the deviation. Documented in the
+                # manual as a trusted-private-mirror deployment escape.
+                "allow_private_networks": False,
+            },
+            # F-17: Centralised tunable constants (timeouts, sizes, rate‑limits).
+            # See ``utils/tunables.py`` for the compile-time defaults and
+            # individual doc-strings. Every key listed here will override
+            # its default when present in the config file.
+            "tunables": {
+                # catcatch_port_range_start: 9527
+                # catcatch_port_range_end: 9539
+                # catcatch_bind_timeout_s: 5.0
+                # catcatch_body_max_bytes: 65536
+                # stop_terminate_grace_s: 0.5
+                # stop_kill_deadline_s: 1.5
+                # pump_join_timeout_s: 0.25
+                # pump_put_timeout_s: 5.0
+                # download_default_manifest_size_mib: 500
+                # download_disk_headroom_factor: 1.2
+                # browser_capture_window_seconds: 12
+                # browser_capture_extend_on_hit_seconds: 4
+                # browser_capture_probe_interval_ms: 1000
+                # browser_stale_profile_max_age_seconds: 86400
+                # browser_proc_wait_timeout_seconds: 10.0
+                # engine_head_probe_timeout_ms: 500
+                # hls_probe_timeout_s: 30.0
+                # worker_soft_exit_timeout_s: 30.0
+            },
             "proxy": {
                 "enabled": False,
                 "http": "",

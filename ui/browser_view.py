@@ -141,7 +141,11 @@ class BrowserView(QWidget):
         self.driver = PlaywrightDriver(headless=False)
         self.driver.browser_ready.connect(self._on_browser_ready)
         self.driver.page_closed.connect(self._on_page_closed)
-        self.driver.resource_detected.connect(self._on_resource_detected)
+        # Prefer the new unified-context signal when available.
+        if hasattr(self.driver, "resource_context_detected"):
+            self.driver.resource_context_detected.connect(self._on_resource_context_detected)
+        else:
+            self.driver.resource_detected.connect(self._on_resource_detected)
         self.driver.error_occurred.connect(self._on_driver_error)
         
         # 不再自动启动浏览器，用户需要时点击 "启动浏览器" 按钮
@@ -182,8 +186,30 @@ class BrowserView(QWidget):
         self.log(TR("msg_install_chrome"))
         self.log(TR("msg_check_chrome_exe"))
         
+    def _on_resource_context_detected(self, context: dict):
+        """资源上下文回调（新统一链路）。"""
+        url = context.get("url", "")
+        headers = context.get("headers", {}) or {}
+        page_url = context.get("page_url", "")
+        page_title = context.get("page_title", "") or context.get("title", "")
+
+        self.log(f"{TR('log_captured')}: {url}")
+
+        if self.sniffer:
+            self.sniffer.add_resource(
+                url,
+                headers,
+                page_url,
+                page_title,
+                source=context.get("source", "internal_browser"),
+                resource_type=context.get("resource_type", ""),
+                mime=context.get("mime", ""),
+                master_url=context.get("master_url"),
+                media_url=context.get("media_url"),
+            )
+
     def _on_resource_detected(self, url, headers, page_url, title):
-        """资源回调"""
+        """资源回调（旧兼容链路）"""
         self.log(f"{TR('log_captured')}: {url}")
         
         # 1. 直接添加到嗅探器核心 (触发 MainWindow 的 on_resource_found)
@@ -246,11 +272,67 @@ class BrowserView(QWidget):
             self.start_browser()
             self.log(TR("log_starting_nav_later"))
 
-    def back(self): pass
-    def forward(self): pass
-    def reload(self): pass
-    def add_new_tab(self, url="about:blank"): 
-        self.load_url(url) # 简化：PW 模式下暂不支持多标签控制
+    def back(self):
+        """浏览器后退"""
+        if self.driver and self._browser_ready:
+            self.driver.go_back()
+        else:
+            self.log(TR("log_browser_not_ready_nav"))
+
+    def forward(self):
+        """浏览器前进"""
+        if self.driver and self._browser_ready:
+            self.driver.go_forward()
+        else:
+            self.log(TR("log_browser_not_ready_nav"))
+
+    def reload(self):
+        """浏览器刷新"""
+        if self.driver and self._browser_ready:
+            self.driver.reload()
+        else:
+            self.log(TR("log_browser_not_ready_nav"))
+
+    def refresh_and_capture_current_page(
+        self,
+        *,
+        page_url: str = "",
+        previous_resource_url: str = "",
+        timeout_ms: int = 15000,
+    ) -> dict:
+        """刷新当前内置浏览器页面并等待新的媒体资源上下文。"""
+        if not (self.driver and self._browser_ready and self.driver.isRunning()):
+            self.log(TR("log_browser_not_ready_nav"))
+            return {"ok": False, "reason": "browser_not_ready", "context": {}}
+
+        self.log("正在刷新页面并等待新的媒体链接...")
+        try:
+            result = self.driver.refresh_and_wait_for_media(
+                page_url=page_url or "",
+                previous_resource_url=previous_resource_url or "",
+                timeout_ms=timeout_ms,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[BrowserView] 刷新重抓媒体资源失败: {exc}",
+                event="browser_view_refresh_capture_failed",
+                error_type=type(exc).__name__,
+            )
+            return {"ok": False, "reason": "exception", "context": {}}
+
+        if result.get("ok") and isinstance(result.get("context"), dict):
+            context = result["context"]
+            self.log(f"刷新后捕获: {context.get('url', '')}")
+        else:
+            self.log("刷新后未捕获到新的媒体链接")
+        return result
+
+    def add_new_tab(self, url="about:blank"):
+        """新建标签页"""
+        if self.driver and self._browser_ready:
+            self.driver.new_tab(url)
+        else:
+            self.log(TR("log_browser_not_ready_nav"))
 
     def export_cookies_to_file(self, url: str = None) -> str:
         """

@@ -5,12 +5,30 @@ from pathlib import Path
 PATTERNS = {
     "sniffer_hit": re.compile(r"event=sniffer_hit"),
     "hls_probe_ok": re.compile(r"event=hls_probe_ok|\[HLS-PROBE\].*预探测通过"),
-    "hls_probe_fail": re.compile(r"event=hls_probe_fail|\[HLS-PROBE\].*预探测失败"),
+    "hls_probe_fail": re.compile(r"event=hls_probe_fail|event=hls_probe_failed|\[HLS-PROBE\].*预探测失败"),
+    "hls_probe_soft_fail": re.compile(r"event=hls_probe_soft_failed|event=hls_probe_failed_soft_allowed"),
     "download_start": re.compile(r"通知: 开始下载|已添加下载任务"),
     "task_failed": re.compile(r"\[FAILED\].*任务失败|通知: 下载失败"),
     "task_completed": re.compile(r"通知: 下载完成|任务完成|下载成功"),
     "retry": re.compile(r"event=download_retry|\[RETRY\]"),
+    "rate_limit_backoff": re.compile(r"event=download_rate_limit_backoff"),
+    "auth_retry": re.compile(r"event=download_auth_retry"),
+    "auth_retry_success": re.compile(r"event=auth_retry_success"),
+    "auth_retry_failed": re.compile(r"event=download_auth_retry_failed"),
+    "fallback_success": re.compile(r"event=download_fallback_recovered"),
+    "segment_suppressed": re.compile(r"event=segment_suppressed"),
+    "low_concurrency_retry": re.compile(r"event=nm3u8dlre_low_concurrency_retry|event=aria2_low_connection_retry"),
     "nm_ok": re.compile(r"event=nm3u8dlre_source_ok"),
+    "fail_reason_auth": re.compile(r"event=fail_reason_auth\b"),
+    "fail_reason_rate_limit": re.compile(r"event=fail_reason_rate_limit\b"),
+    "fail_reason_timeout": re.compile(r"event=fail_reason_timeout\b"),
+    "fail_reason_parse": re.compile(r"event=fail_reason_parse\b"),
+    "fail_reason_drm": re.compile(r"event=fail_reason_drm\b"),
+    "fail_reason_expired": re.compile(r"event=fail_reason_expired\b"),
+    "fail_reason_geo": re.compile(r"event=fail_reason_geo\b"),
+    "fail_reason_tls": re.compile(r"event=fail_reason_tls\b"),
+    "fail_reason_disk": re.compile(r"event=fail_reason_disk\b"),
+    "fail_reason_segment_noise": re.compile(r"event=fail_reason_segment_noise\b"),
 }
 
 
@@ -52,6 +70,8 @@ def load_group(files):
         "download_success_rate": safe_ratio(completes, starts),
         "download_fail_rate": safe_ratio(fails, starts),
         "probe_pass_rate": safe_ratio(total["hls_probe_ok"], probe_total),
+        "auth_retry_success_rate": safe_ratio(total["auth_retry_success"], total["auth_retry"]),
+        "rate_limit_backoff_per_retry": safe_ratio(total["rate_limit_backoff"], total["retry"]),
     }
     return parsed, total, ratios
 
@@ -82,7 +102,34 @@ def write_report(path: Path, baseline_files, candidate_files, base_total, base_r
     lines.append("| Metric | Baseline | Candidate | Delta |")
     lines.append("|---|---:|---:|---:|")
 
-    keys = ["sniffer_hit", "download_start", "task_completed", "task_failed", "retry", "hls_probe_ok", "hls_probe_fail", "nm_ok"]
+    keys = [
+        "sniffer_hit",
+        "download_start",
+        "task_completed",
+        "task_failed",
+        "retry",
+        "hls_probe_ok",
+        "hls_probe_fail",
+        "hls_probe_soft_fail",
+        "nm_ok",
+        "rate_limit_backoff",
+        "auth_retry",
+        "auth_retry_success",
+        "auth_retry_failed",
+        "fallback_success",
+        "segment_suppressed",
+        "low_concurrency_retry",
+        "fail_reason_auth",
+        "fail_reason_rate_limit",
+        "fail_reason_timeout",
+        "fail_reason_parse",
+        "fail_reason_drm",
+        "fail_reason_expired",
+        "fail_reason_geo",
+        "fail_reason_tls",
+        "fail_reason_disk",
+        "fail_reason_segment_noise",
+    ]
     for k in keys:
         b = base_total.get(k, 0)
         c = cand_total.get(k, 0)
@@ -91,6 +138,8 @@ def write_report(path: Path, baseline_files, candidate_files, base_total, base_r
     lines.append(f"| download_success_rate | {fmt_float(base_ratios['download_success_rate'])} | {fmt_float(cand_ratios['download_success_rate'])} | {pct_delta(cand_ratios['download_success_rate'], base_ratios['download_success_rate'])} |")
     lines.append(f"| download_fail_rate | {fmt_float(base_ratios['download_fail_rate'])} | {fmt_float(cand_ratios['download_fail_rate'])} | {pct_delta(cand_ratios['download_fail_rate'], base_ratios['download_fail_rate'])} |")
     lines.append(f"| probe_pass_rate | {fmt_float(base_ratios['probe_pass_rate'])} | {fmt_float(cand_ratios['probe_pass_rate'])} | {pct_delta(cand_ratios['probe_pass_rate'], base_ratios['probe_pass_rate'])} |")
+    lines.append(f"| auth_retry_success_rate | {fmt_float(base_ratios['auth_retry_success_rate'])} | {fmt_float(cand_ratios['auth_retry_success_rate'])} | {pct_delta(cand_ratios['auth_retry_success_rate'], base_ratios['auth_retry_success_rate'])} |")
+    lines.append(f"| rate_limit_backoff_per_retry | {fmt_float(base_ratios['rate_limit_backoff_per_retry'])} | {fmt_float(cand_ratios['rate_limit_backoff_per_retry'])} | {pct_delta(cand_ratios['rate_limit_backoff_per_retry'], base_ratios['rate_limit_backoff_per_retry'])} |")
 
     lines.append("")
     lines.append("## Notes")
@@ -135,6 +184,8 @@ if __name__ == "__main__":
     print(f"candidate_success_rate={fmt_float(cand_ratios['download_success_rate'])}")
     print(f"baseline_probe_pass_rate={fmt_float(base_ratios['probe_pass_rate'])}")
     print(f"candidate_probe_pass_rate={fmt_float(cand_ratios['probe_pass_rate'])}")
+    print(f"baseline_auth_retry_success_rate={fmt_float(base_ratios['auth_retry_success_rate'])}")
+    print(f"candidate_auth_retry_success_rate={fmt_float(cand_ratios['auth_retry_success_rate'])}")
 
     out_path = Path(args.out)
     write_report(

@@ -1,7 +1,6 @@
 @echo off
-chcp 65001 >nul
 echo ============================================
-echo   M3U8VideoSniffer åè®®å¸è½½å·¥å…·
+echo   M3U8VideoSniffer Ð­ÒéÐ¶ÔØ¹¤¾ß
 echo ============================================
 echo.
 
@@ -10,26 +9,26 @@ echo [WARN] Browser extensions will no longer launch this app directly.
 echo.
 pause
 
-:: åˆ›å»ºæ³¨å†Œè¡¨æ¸…ç†æ–‡ä»¶
+:: ´´½¨×¢²á±íÇåÀíÎÄ¼þ
 set "REG_FILE=%TEMP%\m3u8dl_uninstall.reg"
 
 echo Windows Registry Editor Version 5.00 > "%REG_FILE%"
 echo. >> "%REG_FILE%"
 echo [-HKEY_CURRENT_USER\Software\Classes\m3u8dl] >> "%REG_FILE%"
 
-echo [ä¿¡æ¯] æ­£åœ¨åˆ é™¤ m3u8dl:// åè®®å…³è”...
+echo [ÐÅÏ¢] ÕýÔÚÉ¾³ý m3u8dl:// Ð­Òé¹ØÁª...
 echo.
 
-:: å¯¼å…¥æ³¨å†Œè¡¨ï¼ˆæ‰§è¡Œåˆ é™¤ï¼‰
+:: µ¼Èë×¢²á±í£¨Ö´ÐÐÉ¾³ý£©
 regedit /s "%REG_FILE%"
 
 if %ERRORLEVEL% EQU 0 (
-    echo [æˆåŠŸ] åè®®å…³è”å·²æ¸…é™¤ï¼
+    echo [³É¹¦] Ð­Òé¹ØÁªÒÑÇå³ý£¡
 ) else (
-    echo [é”™è¯¯] æ¸…é™¤å¤±è´¥ï¼Œè¯·å°è¯•ä»¥ç®¡ç†å‘˜èº«ä»½è¿è¡Œ
+    echo [´íÎó] Çå³ýÊ§°Ü£¬Çë³¢ÊÔÒÔ¹ÜÀíÔ±Éí·ÝÔËÐÐ
 )
 
-:: æ¸…ç†ä¸´æ—¶æ–‡ä»¶
+:: ÇåÀíÁÙÊ±ÎÄ¼þ
 del "%REG_FILE%" 2>nul
 echo.
 pause

@@ -45,6 +45,9 @@ from utils.errors import StructuredError  # noqa: E402
 from utils.retry import BACKOFF  # noqa: E402
 
 
+_ORIGINAL_MAKE_PINNED_SESSION = mp.make_pinned_session
+
+
 # ---------------------------------------------------------------------------
 # Fake HTTP transport.
 # ---------------------------------------------------------------------------
@@ -122,7 +125,7 @@ def _install_patches(
     cancel_on_sleep: bool = False,
     stop_event: threading.Event | None = None,
 ) -> Tuple[Callable[..., _FakeResponse], List[str]]:
-    """Monkey-patch ``requests.get``, ``interruptible_sleep`` and ``ensure_public``.
+    """Monkey-patch transport, ``interruptible_sleep`` and ``ensure_public``.
 
     ``core.m3u8_parser`` imports :mod:`requests` and
     :func:`interruptible_sleep` at module scope, so we patch those module
@@ -139,6 +142,10 @@ def _install_patches(
 
     transport, calls = _build_scripted_transport(scripted)
     mp.requests.get = transport  # type: ignore[assignment]
+    # Recent parser versions prefer a pinned ``requests.Session``.  Force the
+    # fallback path so the in-memory ``mp.requests.get`` transport remains the
+    # only HTTP surface exercised by this offline smoke.
+    mp.make_pinned_session = lambda *_args, **_kwargs: None  # type: ignore[assignment]
 
     # ``ensure_public`` must be called once per attempt (design §3.1).
     # The real function resolves DNS, which we cannot do offline; a
@@ -176,6 +183,7 @@ def _restore_patches(
     mp.requests.get = original_get  # type: ignore[assignment]
     mp.ensure_public = original_ensure  # type: ignore[assignment]
     mp.interruptible_sleep = original_sleep  # type: ignore[assignment]
+    mp.make_pinned_session = _ORIGINAL_MAKE_PINNED_SESSION  # type: ignore[assignment]
 
 
 def _new_thread(url: str = "https://example.invalid/playlist.m3u8") -> mp.M3U8FetchThread:
@@ -216,8 +224,11 @@ def assert_backoff_sequence_four_attempts() -> None:
     assert result.startswith("#EXTM3U"), f"unexpected body: {result!r}"
     # Initial attempt + 3 retries == 4 transport calls.
     assert len(calls) == 4, f"expected 4 attempts, got {len(calls)}: {calls}"
-    assert len(ensure_calls) == 4, (
-        f"ensure_public must fire once per attempt (got {len(ensure_calls)})"
+    # Current parser versions run a cheap retry pre-flight guard and then a
+    # pinned-session guard inside ``_fetch_once``.  Both are expected and keep
+    # each retry SSRF-safe without touching real DNS in this smoke.
+    assert len(ensure_calls) == 8, (
+        f"ensure_public must fire twice per attempt (got {len(ensure_calls)})"
     )
 
     # Exactly ``len(BACKOFF)`` sleeps fire before the final success. Each
@@ -274,7 +285,7 @@ def assert_backoff_exhaustion_returns_structured_error() -> None:
     assert result.reason == "max_retries_exhausted", result
     # All 4 attempts fired and all 3 sleeps ran before the loop gave up.
     assert len(sleep_log) == len(BACKOFF), sleep_log
-    assert len(ensure_calls) == 4, ensure_calls
+    assert len(ensure_calls) == 8, ensure_calls
 
 
 def assert_cancel_during_backoff_returns_cancelled() -> None:

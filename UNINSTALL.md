@@ -30,6 +30,11 @@ Playwright/Chromium 产生的用户数据（Cookie、缓存等）：
 *   **路径**：`%USERPROFILE%\.m3u8sniffer`
 *   **操作**：进入 `C:\Users\您的用户名`，删除 `.m3u8sniffer` 文件夹（如果是隐藏的，请在查看中开启显示隐藏项目）。
 
+### 程序运行时数据
+会话令牌、TOFU 组件信任记录、协议处理器状态：
+*   **路径**：`%USERPROFILE%\.m3u8d`
+*   **操作**：进入 `C:\Users\您的用户名`，删除 `.m3u8d` 文件夹（包含 `session.token`、`component_pins.json` 等文件）。
+
 ### 临时文件
 下载过程中产生的临时分片文件：
 *   **路径**：`%TEMP%\M3U8Sniffer`
@@ -37,4 +42,4 @@ Playwright/Chromium 产生的用户数据（Cookie、缓存等）：
 
 ---
 
-完成以上步骤后，软件即被彻底卸载。感谢您的使用！
+完成以上步骤后，软件即被彻底卸载（包括 v0.5.0 新增的 `~/.m3u8d` 会话/信任数据）。感谢您的使用！

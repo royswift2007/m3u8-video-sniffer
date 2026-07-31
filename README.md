@@ -1,4 +1,4 @@
-# M3U8D v0.4.1
+# M3U8D v0.5.0
 
 <p align="leftr">
   <b>English</b> | <a href="README_ZH.md">简体中文</a>
@@ -55,7 +55,7 @@ Five download engines work together:
 | Aria2 | Direct-link files and magnet links |
 | FFmpeg | Post-processing (remux, merge, subtitle extraction) |
 
-Engine selection priority: user preference → extension-based detection → MIME probe → live-platform list → yt-dlp fallback. Rules are externalized in `resources/engine_rules.json`.
+Engine selection priority: user preference → context-aware detection (resource_type/mime) → HEAD MIME probe → extension-based fallback → live-platform list → yt-dlp fallback. Context flows end-to-end from resource detection through [`core/download_context.py`](core/download_context.py). Rules are externalized in `resources/engine_rules.json`.
 
 ### Download Management
 
@@ -178,7 +178,7 @@ Declared in `deps.json`:
 |------|------|-------|
 | Build | PyInstaller | `build_pyinstaller.py` / `build_pyinstaller.bat` |
 | Installer | Inno Setup | `installer/M3U8D.iss` |
-| Output | | `installer/output/M3U8D-Setup v0.4.1.exe` |
+| Output | | `installer/output/M3U8D-Setup v0.5.0.exe` |
 
 The installer can:
 - Install the main application bundle and protocol handler
@@ -195,6 +195,7 @@ M3U8D/
 ├── config.json                # application configuration
 ├── deps.json                  # external dependency manifest
 ├── core/                      # sniffing, download management, component updates
+│   ├── download_context.py    # unified download context (EngineSelectContext)
 │   └── download/              # modular download manager (queue, workers, classifier)
 ├── engines/                   # download-engine adapters
 ├── ui/                        # PyQt6 GUI layer
@@ -242,7 +243,7 @@ See [`OPEN_SOURCE_NOTICE.md`](OPEN_SOURCE_NOTICE.md).
 ## Related Documents
 
 - [INSTALL.md](INSTALL.md) — installation and environment setup
-- [CHANGELOG_v0.4.1.md](CHANGELOG_v0.4.1.md) — detailed changelog from v0.3.1
+- [CHANGELOG_v0.5.0.md](CHANGELOG_v0.5.0.md) — detailed changelog from v0.3.1
 - [resources/manual_zh.md](resources/manual_zh.md) — detailed Chinese user manual
 - [resources/manual_en.md](resources/manual_en.md) — detailed English user manual
 

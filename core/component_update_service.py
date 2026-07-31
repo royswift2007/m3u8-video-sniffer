@@ -212,6 +212,46 @@ class ComponentUpdateService:
             )
 
         comparison = self.compare_versions(local.version, remote.latest_version)
+        # Prerelease guard: suppress AUTOMATIC upgrade to a prerelease unless
+        # the manifest opted in via ``allow_prerelease``. However, an explicit
+        # user action (``force=True`` — i.e. the operator clicked the update
+        # button and confirmed the prerelease warning) is allowed through so
+        # users can manually opt into a beta when they choose to. This keeps
+        # batch/auto updates safe while still surfacing the prerelease as an
+        # actionable update in the UI.
+        remote_is_prerelease = (
+            bool(remote.latest_version)
+            and self._prerelease_tag(remote.latest_version) is not None
+        )
+        allow_prerelease = bool(getattr(entry.update, "allow_prerelease", False)) if entry.update else False
+        if remote_is_prerelease and not allow_prerelease and not force:
+            result = ComponentUpdateResult(
+                component_id=entry.id,
+                label=entry.label,
+                success=True,
+                skipped=True,
+                status="remote_is_prerelease",
+                code="remote_is_prerelease",
+                message=(
+                    f"remote version {remote.latest_version} is a prerelease; "
+                    "automatic upgrade suppressed (click update again to opt in, "
+                    "or set allow_prerelease=true in deps.json)"
+                ),
+                old_version=local.version,
+                new_version=local.version,
+                local_version=local.version,
+                remote_version=remote.latest_version,
+                asset_name=remote.asset_name,
+                asset_url=remote.asset_url,
+            )
+            self.state_store.update_component_state(
+                entry.id,
+                self._state_patch_for_result(result, local=local, remote=remote, status="remote_is_prerelease"),
+            )
+            self.state_store.record_update_result(result)
+            emit("remote_is_prerelease", result.message, percent=100)
+            return result
+
         should_update = force or status.update_available or comparison == -1 or not local.exists
         if not should_update:
             result = ComponentUpdateResult(
@@ -392,10 +432,12 @@ class ComponentUpdateService:
         if local_date is not None and remote_date is not None:
             return self._cmp_tuple(local_date, remote_date)
 
-        local_semver = self._parse_semantic_version(local)
-        remote_semver = self._parse_semantic_version(remote)
-        if local_semver is not None and remote_semver is not None:
-            return self._cmp_tuple(local_semver, remote_semver)
+        # SemVer-aware comparison: honors prerelease precedence so that
+        # ``0.6.0`` ranks above ``0.6.0-beta`` (SemVer §11). This prevents
+        # auto-upgrade from a stable release to a prerelease of the same core.
+        semver_cmp = self._compare_semantic(local, remote)
+        if semver_cmp is not None:
+            return semver_cmp
 
         return None
 
@@ -418,6 +460,22 @@ class ComponentUpdateService:
         comparison = self.compare_versions(local.version, remote.latest_version)
         comparable = comparison in (-1, 0, 1) and not remote.error and local.version and remote.latest_version
         update_available = comparison == -1 and bool(remote.asset_url) and not remote.error
+
+        # Prerelease guard: when the remote release carries a prerelease
+        # suffix (e.g. ``0.6.0-beta``) and the component manifest has not
+        # opted into prerelease upgrades (``allow_prerelease``), suppress
+        # the auto-upgrade regardless of the numeric comparison. This
+        # prevents a stable install from being silently replaced by an
+        # upstream beta published as the "latest" release.
+        remote_is_prerelease = (
+            bool(remote.latest_version)
+            and self._prerelease_tag(remote.latest_version) is not None
+        )
+        allow_prerelease = bool(getattr(entry.update, "allow_prerelease", False)) if entry.update else False
+        prerelease_blocked = remote_is_prerelease and not allow_prerelease
+        if prerelease_blocked:
+            update_available = False
+
         if not local.exists:
             status = "missing"
             message = "component file is missing"
@@ -430,6 +488,20 @@ class ComponentUpdateService:
         elif not remote.asset_url:
             status = "asset_missing"
             message = "remote release has no downloadable asset"
+        elif prerelease_blocked and comparison == -1:
+            # Remote is a prerelease AND its numeric core is newer than local.
+            # Suppress auto-upgrade but surface as an actionable prerelease row.
+            status = "remote_is_prerelease"
+            message = (
+                f"remote version {remote.latest_version} is a prerelease; "
+                "automatic upgrade suppressed (set allow_prerelease=true to opt in)"
+            )
+        elif prerelease_blocked:
+            # Remote is a prerelease but local is already newer or equal
+            # (e.g. local 0.6.0 vs remote 0.6.0-beta).  Treat as "latest"
+            # so the UI does not misleadingly show an available update.
+            status = "latest"
+            message = None
         elif comparison is None:
             status = "version_unknown"
             message = "version comparison is unknown"
@@ -542,6 +614,7 @@ class ComponentUpdateService:
                     "remote_asset_name": remote.asset_name,
                     "remote_asset_url": remote.asset_url,
                     "remote_error": remote.error,
+                    **self._remote_prerelease_fields(remote.latest_version),
                 }
             )
         if download is not None:
@@ -572,6 +645,7 @@ class ComponentUpdateService:
             "remote_asset_name": remote.asset_name,
             "remote_asset_url": remote.asset_url,
             "remote_error": remote.error,
+            **self._remote_prerelease_fields(remote.latest_version),
             "version_comparison": self.compare_versions(local.version, remote.latest_version) if self.compare_versions(local.version, remote.latest_version) is not None else "unknown",
             "update_available": update_available,
             "status": status,
@@ -593,10 +667,27 @@ class ComponentUpdateService:
         if local is not None:
             patch.update({"local_version": local.version, "local_exists": local.exists, "local_error": local.error})
         if remote is not None:
-            patch.update({"latest_version": remote.latest_version, "remote_version": remote.latest_version, "remote_asset_name": remote.asset_name, "remote_asset_url": remote.asset_url, "remote_error": remote.error})
+            patch.update(
+                {
+                    "latest_version": remote.latest_version,
+                    "remote_version": remote.latest_version,
+                    "remote_asset_name": remote.asset_name,
+                    "remote_asset_url": remote.asset_url,
+                    "remote_error": remote.error,
+                    **self._remote_prerelease_fields(remote.latest_version),
+                }
+            )
         if download is not None:
             patch["last_download"] = download.to_dict()
         self.state_store.update_component_state(component_id, patch)
+
+    def _remote_prerelease_fields(self, version: str | None) -> dict[str, Any]:
+        """Return state fields that preserve remote prerelease metadata."""
+        tag = self._prerelease_tag(version) if version else None
+        return {
+            "remote_prerelease": bool(tag),
+            "remote_prerelease_tag": tag or "",
+        }
 
     def _details(
         self,
@@ -644,6 +735,15 @@ class ComponentUpdateService:
 
     @staticmethod
     def _parse_semantic_version(version: str) -> tuple[int, ...] | None:
+        """Parse the numeric core of a semantic version.
+
+        Only the leading ``MAJOR.MINOR.PATCH`` numeric core is returned here;
+        prerelease (``-beta``) and build (``+meta``) suffixes are intentionally
+        dropped because the tuple is used only for the numeric precedence
+        comparison. Prerelease handling is layered on top by
+        :meth:`_compare_semantic` so that ``0.6.0`` is correctly ranked above
+        ``0.6.0-beta`` (SemVer §11).
+        """
         base = re.split(r"[-+]", version, maxsplit=1)[0]
         if not re.fullmatch(r"\d+(?:\.\d+){1,3}", base):
             return None
@@ -651,6 +751,78 @@ class ComponentUpdateService:
         while len(parts) < 3:
             parts = parts + (0,)
         return parts
+
+    @staticmethod
+    def _prerelease_tag(version: str) -> str | None:
+        """Return the prerelease identifier (e.g. ``beta`` for ``0.6.0-beta``).
+
+        Returns ``None`` for a clean release (no ``-`` prerelease suffix).
+        Build metadata after ``+`` is ignored per SemVer §10.
+        """
+        # Strip build metadata first.
+        core = re.split(r"\+", version, maxsplit=1)[0]
+        match = re.split(r"-", core, maxsplit=1)
+        if len(match) == 2 and match[1].strip():
+            return match[1].strip()
+        return None
+
+    @classmethod
+    def _compare_semantic(cls, local: str, remote: str) -> int | None:
+        """SemVer-aware comparison honoring prerelease precedence.
+
+        SemVer §11 rules implemented:
+        * Compare numeric cores lexicographically.
+        * A version WITHOUT a prerelease tag has HIGHER precedence than the
+          same core WITH a prerelease tag (``0.6.0`` > ``0.6.0-beta``).
+        * Two prereleases of the same core are compared by their dot-separated
+          identifiers (numeric < alphanumeric; all-numeric compared as ints).
+
+        Returns -1 / 0 / 1, or ``None`` when either side is not a parseable
+        semantic version.
+        """
+        local_core = cls._parse_semantic_version(local)
+        remote_core = cls._parse_semantic_version(remote)
+        if local_core is None or remote_core is None:
+            return None
+        core_cmp = cls._cmp_tuple(local_core, remote_core)
+        if core_cmp != 0:
+            return core_cmp
+
+        local_pre = cls._prerelease_tag(local)
+        remote_pre = cls._prerelease_tag(remote)
+        # No prerelease => higher precedence than any prerelease.
+        if local_pre is None and remote_pre is None:
+            return 0
+        if local_pre is None:
+            return 1  # local is a release, remote is prerelease => local newer
+        if remote_pre is None:
+            return -1  # local is prerelease, remote is release => remote newer
+        # Both prereleases of the same core: compare identifiers.
+        return cls._cmp_prerelease(local_pre, remote_pre)
+
+    @staticmethod
+    def _cmp_prerelease(left: str, right: str) -> int:
+        """Compare two SemVer prerelease strings per §11.4."""
+        left_ids = left.split(".")
+        right_ids = right.split(".")
+        for a, b in zip(left_ids, right_ids):
+            a_num = a.isdigit()
+            b_num = b.isdigit()
+            if a_num and b_num:
+                ai, bi = int(a), int(b)
+                if ai != bi:
+                    return -1 if ai < bi else 1
+                continue
+            if a_num and not b_num:
+                return -1  # numeric < alphanumeric
+            if b_num and not a_num:
+                return 1
+            if a != b:
+                return -1 if a < b else 1
+        # All shared identifiers equal: shorter prerelease has lower precedence
+        if len(left_ids) == len(right_ids):
+            return 0
+        return -1 if len(left_ids) < len(right_ids) else 1
 
     @staticmethod
     def _cmp_tuple(left: tuple[int, ...], right: tuple[int, ...]) -> int:
